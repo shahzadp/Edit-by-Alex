@@ -17,6 +17,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.alex.photoeditor.ui.EditorViewModel
 import com.alex.photoeditor.ui.screens.EditorScreen
+import com.alex.photoeditor.ui.components.AllFilesGate
 import com.alex.photoeditor.ui.theme.PhotoEditorTheme
 
 class MainActivity : ComponentActivity() {
@@ -109,11 +110,15 @@ class MainActivity : ComponentActivity() {
                     vm.consumeShareRequest()
                 }
 
-                EditorScreen(
-                    vm = vm,
-                    onPickImage = { pickImage.launch(arrayOf("image/*")) },
-                    onPickLayer = { pickLayer.launch(arrayOf("image/*")) }
-                )
+                // The whole app is gated behind all files access — the editor is a
+                // file manager for media; without direct storage there is no product.
+                AllFilesGate {
+                    EditorScreen(
+                        vm = vm,
+                        onPickImage = { pickImage.launch(arrayOf("image/*")) },
+                        onPickLayer = { pickLayer.launch(arrayOf("image/*")) }
+                    )
+                }
             }
         }
     }
@@ -128,8 +133,9 @@ class MainActivity : ComponentActivity() {
      *
      * Without this the activity was a leaf: Back exited the app outright even
      * with the export sheet open or a photo loaded, which read as "the back
-     * button does not work". Back now closes the sheet first, then returns to
-     * the picker if an image is open, and only leaves the app from there.
+     * button does not work". Back now unwinds the current tab's chrome first,
+     * then steps from the secondary tab back to the primary gallery tab, and
+     * only leaves the app from the gallery.
      *
      * Uses the modern callback rather than the overridden `onBackPressed`,
      * which Android 13+ ignores once an activity opts into predictive back.
@@ -141,14 +147,25 @@ class MainActivity : ComponentActivity() {
             return
         }
         when {
-            // The export sheet is a modal layer, so Back should dismiss it
-            // rather than doing anything to the edit.
+            // Sheets are modal layers: Back dismisses them rather than doing
+            // anything to what is underneath.
             vm.showExportSheet -> vm.closeExportSheet()
 
-            // An image is open: step back to the empty picker screen.
+            vm.showProjects -> vm.closeProjects()
+
+            vm.showNewProject -> vm.closeNewProject()
+
+            // An image is open on the editor tab: step back to the editor home.
             vm.hasImage -> vm.closeImage()
 
-            else -> finish()
+            // The gallery is the primary tab, so Back there leaves the app.
+            // (The viewer and the folder drill-in inside GalleryScreen have
+            // their own BackHandlers and consume Back first when open.)
+            vm.showGallery -> finish()
+
+            // The editor is the secondary tab: Back lands on the primary tab
+            // rather than exiting.
+            else -> vm.openGallery()
         }
     }
 

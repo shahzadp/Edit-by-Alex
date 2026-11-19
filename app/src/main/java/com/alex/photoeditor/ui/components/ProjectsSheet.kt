@@ -28,11 +28,13 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -68,6 +70,10 @@ fun ProjectsSheet(vm: EditorViewModel) {
     val projects = vm.projects
     val loading = vm.isLoadingProjects
 
+    // Deleting a project is irreversible, so the trash icon arms a dialog
+    // rather than acting on the tap directly.
+    var pendingDelete by remember { mutableStateOf<ProjectSummary?>(null) }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -91,6 +97,35 @@ fun ProjectsSheet(vm: EditorViewModel) {
                     onClick = {}
                 )
         ) {
+            // Delete confirmation. Drawn inside the sheet so the backdrop and
+            // stacking order stay the same as every other modal in the app.
+            pendingDelete?.let { project ->
+                AlertDialog(
+                    onDismissRequest = { pendingDelete = null },
+                    title = { Text("Delete project?") },
+                    text = {
+                        Text(
+                            "\"${project.displayName}\" will be removed. Any photos you exported are not affected."
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            vm.deleteProject(project.id)
+                            pendingDelete = null
+                        }) {
+                            Text(
+                                "Delete",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { pendingDelete = null }) {
+                            Text("Cancel")
+                        }
+                    }
+                )
+            }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -110,7 +145,7 @@ fun ProjectsSheet(vm: EditorViewModel) {
                     )
                 }
                 IconButton(onClick = vm::closeProjects) {
-                    Icon(Icons.Filled.Close, contentDescription = "Close projects")
+                    Icon(Icons.Filled.Close, contentDescription = "Close projects", tint = MaterialTheme.colorScheme.onSurface)
                 }
                 IconButton(onClick = vm::openNewProjectChooser) {
                     Icon(
@@ -174,7 +209,7 @@ fun ProjectsSheet(vm: EditorViewModel) {
                         ProjectTile(
                             project = project,
                             onOpen = { vm.openProject(project.id) },
-                            onDelete = { vm.deleteProject(project.id) }
+                            onDelete = { pendingDelete = project }
                         )
                     }
                 }
@@ -233,7 +268,7 @@ fun NewProjectSheet(
                     modifier = Modifier.weight(1f)
                 )
                 IconButton(onClick = vm::closeNewProject) {
-                    Icon(Icons.Filled.Close, contentDescription = "Cancel")
+                    Icon(Icons.Filled.Close, contentDescription = "Cancel", tint = MaterialTheme.colorScheme.onSurface)
                 }
             }
 

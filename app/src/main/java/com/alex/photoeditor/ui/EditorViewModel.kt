@@ -140,6 +140,23 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var showNewProject by mutableStateOf(false)
         private set
 
+    /**
+     * True while the storage gallery is showing.
+     *
+     * The gallery is the app's primary first tab, so the app lands here on
+     * launch rather than on the editor.
+     */
+    var showGallery by mutableStateOf(true)
+        private set
+
+    fun openGallery() {
+        showGallery = true
+    }
+
+    fun closeGallery() {
+        showGallery = false
+    }
+
     fun openNewProjectChooser() {
         showNewProject = true
     }
@@ -448,8 +465,37 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     // ------------------------------------------------------------- actions
 
-    fun openImage(uri: Uri) {
+    /**
+     * Set when the current image was opened via the gallery, so Back returns
+     * to the gallery instead of the editor home screen.
+     */
+    private var returnToGalleryAfterClose = false
+
+    /**
+     * URI of the image the user was last viewing, or null. Set when the user
+     * taps the gallery's edit action, so returning there reopens the viewer
+     * on the exact image that was being edited rather than the grid.
+     */
+    var resumeViewerUri: Uri? = null
+        private set
+
+    /**
+     * Opens [uri] in the editor. When [returnToGallery] is true, closing the
+     * image (Back or the top bar's back arrow) lands back in the gallery
+     * rather than the editor home screen.
+     */
+    fun openImage(uri: Uri, returnToGallery: Boolean = false) {
+        // Opening a photo is always a request to see the editor, whichever
+        // tab it came from — the share intent, the picker, or the gallery.
+        showGallery = false
+        returnToGalleryAfterClose = returnToGallery
+        resumeViewerUri = if (returnToGallery) uri else null
         viewModelScope.launch { repository.open(getApplication(), uri) }
+    }
+
+    /** Clears the one-shot viewer-resume signal consumed by the gallery. */
+    fun clearResumeViewerUri() {
+        resumeViewerUri = null
     }
 
     /** True when an image is open, so Back should return to the picker. */
@@ -464,6 +510,13 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // last few seconds of edits are lost.
         flushAutosave()
         repository.close()
+        // If the user came from the gallery, go back to it rather than to the
+        // editor's empty state — the gallery is a separate destination, not
+        // a hidden route inside the editor.
+        if (returnToGalleryAfterClose) {
+            returnToGalleryAfterClose = false
+            showGallery = true
+        }
     }
 
     fun selectTool(tool: EditorTool) {

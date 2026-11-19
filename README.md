@@ -1,7 +1,7 @@
-# PhotoEditor by Alex
+# Edit by Alex
 
-Offline photo editor for Android. Kotlin + Jetpack Compose, no network calls,
-no ads.
+Offline gallery and photo editor for Android. Kotlin + Jetpack Compose, no
+network calls, no ads.
 
 ## Features
 
@@ -9,9 +9,16 @@ no ads.
   bundled model, nothing leaves the phone)
 - Colour grading and global adjustments
 - Layers with blend controls, draw layer and crop
-- EXIF-aware export (keeps orientation/metadata)
+- EXIF-aware export (orientation normalised; no GPS re-embedded)
+- **Storage gallery** — folder-first browser for everything on the device
+  (grouped strictly by bucket id; sortable Recent / Alphabetical / Size /
+  Custom), with in-place playback, folder creation, and move/copy/delete to
+  the system Trash — long-press to select
 
 Everything happens on-device. There is no analytics, no account, no upload.
+The single permission is `MANAGE_EXTERNAL_STORAGE` (full file access): the
+app browses, moves, copies and deletes storage files directly, and does not
+start without it. The claim to check is simply that no bytes leave the phone.
 
 ## Build
 
@@ -30,7 +37,7 @@ committed to this repository.
 
 ## Status
 
-v1.0 — first public release. Signed APKs are attached to
+v1.1 — gallery-first redesign. Signed APKs are attached to
 [GitHub Releases](https://github.com/shahzadp/PhotoEditorbyAlex/releases).
 
 ## License

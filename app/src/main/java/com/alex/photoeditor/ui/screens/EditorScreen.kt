@@ -25,17 +25,24 @@ import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -66,6 +73,7 @@ import com.alex.photoeditor.ui.components.InfoPanel
 import com.alex.photoeditor.ui.components.LayerGestureStage
 import com.alex.photoeditor.ui.components.LayersPanel
 import com.alex.photoeditor.ui.components.NewProjectSheet
+import com.alex.photoeditor.ui.components.NamedActionIconButton
 import com.alex.photoeditor.ui.components.ProjectsSheet
 import com.alex.photoeditor.ui.components.TapSelectPanel
 import com.alex.photoeditor.ui.components.TextGestureStage
@@ -85,37 +93,85 @@ fun EditorScreen(
     // the content unless the safe area is applied here.
     val safeArea = rememberSafeArea()
 
-    Box(
+    // Status messages ("Saved to gallery", "Could not write the file", ...)
+    // used to be assigned into ViewModel state that nothing ever displayed,
+    // so every confirmation was silently swallowed. The snackbar is the
+    // standard place for them.
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(vm.statusMessage) {
+        val message = vm.statusMessage ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        vm.clearStatus()
+    }
+
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .padding(
-                top = safeArea.top,
-                bottom = safeArea.bottom,
-                start = safeArea.start,
-                end = safeArea.end
-            )
     ) {
-        when {
-            state.error != null -> ErrorState(state.error!!, onPickImage)
-            state.bitmap == null -> EmptyState(onPickImage, vm::openProjects)
-            else -> EditorContent(
-                vm = vm,
-                state = state,
-                onPickLayer = onPickLayer
+        // Top inset stays on the content; the bottom inset is owned by
+        // the NavigationBar below, so the gesture pill and the nav bar
+        // never overlap either editor chrome or gallery content.
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(
+                    top = safeArea.top,
+                    start = safeArea.start,
+                    end = safeArea.end
+                )
+        ) {
+                if (vm.showGallery) {
+                    // `vm.resumeViewerUri` survives the gallery's exit and
+                    // re-entry — it marks the image to re-open on Back.
+                    GalleryScreen(
+                        onEditPhoto = { uri -> vm.openImage(uri, returnToGallery = true) },
+                        resumeViewerUri = vm.resumeViewerUri,
+                        onViewerResumeConsumed = { vm.clearResumeViewerUri() }
+                    )
+                } else {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    when {
+                        state.error != null -> ErrorState(state.error!!, onPickImage)
+                        state.bitmap == null -> EmptyState(
+                            onPickImage = onPickImage,
+                            onOpenProjects = vm::openProjects
+                        )
+                        else -> EditorContent(
+                            vm = vm,
+                            state = state,
+                            onPickLayer = onPickLayer
+                        )
+                    }
+
+                    if (state.isLoading) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.background),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                }
+            }
+
+            // Anchored top: the bottom of the screen is the tool rail and
+            // panel, and a snackbar over the export button area would
+            // flicker touches.
+            SnackbarHost(
+                hostState = snackbarHostState,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 12.dp)
             )
         }
 
-        if (state.isLoading) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(MaterialTheme.colorScheme.background),
-                contentAlignment = Alignment.Center
-            ) {
-                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-            }
-        }
+        AppBottomNavBar(
+            gallerySelected = vm.showGallery,
+            onSelectEditor = vm::closeGallery,
+            onSelectGallery = vm::openGallery
+        )
     }
 
     if (vm.showExportSheet) {
@@ -306,6 +362,60 @@ private fun EditorContent(
     }
 }
 
+/**
+ * The app's permanent two-destination bar.
+ *
+ * The gallery used to be a one-off button on the home screen, which made it
+ * invisible anywhere else and reachable only when no photo was open. A bottom
+ * nav bar makes it a peer of the editor: one tap, always, from either place.
+ *
+ * Stays visible under the fullscreen viewer as well — it doubles as a quick
+ * way back to the editor without hunting for the back arrow.
+ */
+@Composable
+private fun AppBottomNavBar(
+    gallerySelected: Boolean,
+    onSelectEditor: () -> Unit,
+    onSelectGallery: () -> Unit
+) {
+    NavigationBar(
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        // Gallery is the primary first tab and the landing destination when
+        // the app starts; the editor sits second.
+        NavigationBarItem(
+            selected = gallerySelected,
+            onClick = onSelectGallery,
+            icon = { Icon(Icons.Filled.PhotoLibrary, contentDescription = null) },
+            label = { Text("Gallery") },
+            alwaysShowLabel = true,
+            modifier = Modifier.semantics { contentDescription = "Gallery" },
+            colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurface,
+                selectedTextColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurface,
+                indicatorColor = MaterialTheme.colorScheme.secondaryContainer
+            )
+        )
+        NavigationBarItem(
+            selected = !gallerySelected,
+            onClick = onSelectEditor,
+            icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
+            label = { Text("Editor") },
+            alwaysShowLabel = true,
+            modifier = Modifier.semantics { contentDescription = "Editor" },
+            colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
+                selectedIconColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                unselectedIconColor = MaterialTheme.colorScheme.onSurface,
+                selectedTextColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                unselectedTextColor = MaterialTheme.colorScheme.onSurface,
+                indicatorColor = MaterialTheme.colorScheme.secondaryContainer
+            )
+        )
+    }
+}
+
 @Composable
 private fun TopBar(
     vm: EditorViewModel,
@@ -317,38 +427,32 @@ private fun TopBar(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 4.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp)
     ) {
-        IconButton(
-            // Matches the system Back button: step out of the editor rather
-            // than wiping every edit. Reverting is already covered by undo, and
-            // a lone back arrow silently destroying the edit was surprising.
+        NamedActionIconButton(
+            name = "Back",
+            icon = Icons.AutoMirrored.Filled.ArrowBack,
             onClick = { vm.closeImage() },
-            modifier = Modifier.semantics { contentDescription = "Close photo" }
-        ) {
-            Icon(
-                Icons.AutoMirrored.Filled.ArrowBack,
-                "Close",
-                tint = MaterialTheme.colorScheme.onSurface
-            )
-        }
+            contentDescription = "Back"
+        )
 
-        IconButton(
+        NamedActionIconButton(
+            name = "Undo",
+            icon = Icons.AutoMirrored.Filled.Undo,
             onClick = vm::undo,
             enabled = state.canUndo,
-            modifier = Modifier.semantics { contentDescription = "Undo" }
-        ) {
-            Icon(Icons.AutoMirrored.Filled.Undo, "Undo")
-        }
+            contentDescription = "Undo"
+        )
 
-        IconButton(
+        NamedActionIconButton(
+            name = "Redo",
+            icon = Icons.AutoMirrored.Filled.Redo,
             onClick = vm::redo,
             enabled = state.canRedo,
-            modifier = Modifier.semantics { contentDescription = "Redo" }
-        ) {
-            Icon(Icons.AutoMirrored.Filled.Redo, "Redo")
-        }
+            contentDescription = "Redo"
+        )
 
         // Hold to see the original. A filled tonal state while held makes the
         // "you are looking at the unedited photo" moment unambiguous.
@@ -377,24 +481,28 @@ private fun TopBar(
             )
         }
 
-        IconButton(
+        NamedActionIconButton(
+            name = "Share",
+            icon = Icons.Filled.Share,
             onClick = { vm.share() },
-            modifier = Modifier.semantics { contentDescription = "Share" }
-        ) {
-            Icon(Icons.Filled.Share, "Share")
-        }
+            contentDescription = "Share"
+        )
 
-        IconButton(
+        NamedActionIconButton(
+            name = "Save to gallery",
+            icon = Icons.Filled.Download,
             onClick = vm::openExportSheet,
-            modifier = Modifier.semantics { contentDescription = "Save to gallery" }
-        ) {
-            Icon(Icons.Filled.Download, "Save", tint = MaterialTheme.colorScheme.primary)
-        }
+            tint = MaterialTheme.colorScheme.primary,
+            contentDescription = "Save to gallery"
+        )
     }
 }
 
 @Composable
-private fun EmptyState(onPickImage: () -> Unit, onOpenProjects: () -> Unit) {
+private fun EmptyState(
+    onPickImage: () -> Unit,
+    onOpenProjects: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -413,7 +521,7 @@ private fun EmptyState(onPickImage: () -> Unit, onOpenProjects: () -> Unit) {
         )
         Spacer(Modifier.height(20.dp))
         Text(
-            "Photo Editor by Alex",
+            "Edit by Alex",
             style = MaterialTheme.typography.titleLarge,
             // Explicitly on-surface rather than the default: the title sits on
             // the near-black background, where the inherited colour from the

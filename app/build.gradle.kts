@@ -16,8 +16,8 @@ android {
         applicationId = "com.alex.photoeditor"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     // ---------------------------------------------------------------- signing
@@ -171,6 +171,9 @@ dependencies {
 
     // Backs the "tap to select" background removal tool.
     implementation(libs.mediapipe.tasks.vision)
+
+    // Renders .svg images in the gallery viewer and grid.
+    implementation(libs.androidsvg)
 
     testImplementation(libs.junit)
 }
