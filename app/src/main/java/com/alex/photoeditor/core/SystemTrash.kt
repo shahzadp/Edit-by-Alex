@@ -15,16 +15,20 @@ import java.util.Locale
  *
  * Two sources, merged:
  *
- *  1. MediaStore with IS_TRASHED = 1 — every image, video and audio file the
- *     device classes as trashed, regardless of which app put them there.
- *  2. A filesystem sweep of `.Trash-*` directories at the volume root — the
- *     media provider's trash, which includes files of any type, not just
- *     media. Items found here are not visible through MediaStore.
+ *  1. MediaStore with QUERY_ARG_MATCH_TRASHED = MATCH_ONLY — the provider
+ *     silently filters trashed rows out of ordinary queries, so an explicit
+ *     query argument is the only system-sanctioned way to ask for them.
+ *     This sees everything trashed through the system: images, video, audio
+ *     and Files rows (APKs, PDFs, archives…), whichever app put them there.
+ *  2. A filesystem sweep of any `.Trash*`-like directory found directly at a
+ *     volume root — a last-resort fallback for providers that never index
+ *     trashed files in MediaStore at all.
  *
- * Restore goes through [MediaStore.createTrashRequest] with trashed = false
- * for media items (the system puts them back where they came from); for
- * filesystem-only items we move them to the shared-storage root, which is
- * honest about not knowing the original location.
+ * Items found in source 1 know their original location through the system,
+ * so restore goes through [MediaStore.createTrashRequest] with trashed = false.
+ * Filesystem-only items have no known original location, so restoring moves
+ * them to Downloads/Edit by Alex Restored/ — visible in Files/Gallery, honest
+ * about not knowing where they came from.
  */
 object SystemTrash {
 
@@ -69,16 +73,26 @@ object SystemTrash {
         merged.sortedByDescending { it.dateAddedSeconds }
     }
 
-    /** Moves a filesystem entry to the shared-storage root with a unique name. */
-    suspend fun restoreFromFilesystem(context: Context, entry: Entry): Boolean =
+    /**
+     * Moves a filesystem-visible item back out of trash, into
+     * Downloads/Edit by Alex Restored/ with a unique name. Returns the
+     * destination path on success, or null when the file is missing or not
+     * readable (another app's trash directory can be mode 700 — in that case
+     * only the system can put the file back).
+     */
+    suspend fun restoreFromFilesystem(context: Context, entry: Entry): String? =
         withContext(Dispatchers.IO) {
-            val source = entry.path ?: return@withContext false
+            val source = entry.path ?: return@withContext null
             val sourceFile = File(source)
-            if (!sourceFile.exists()) return@withContext false
+            if (!sourceFile.exists() || !sourceFile.canRead()) return@withContext null
 
-            val dir = Environment.getExternalStorageDirectory()
-            dir?.mkdirs()
-            var target = File(dir ?: return@withContext false, sourceFile.name)
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                "Edit by Alex Restored"
+            )
+            if (!dir.exists() && !dir.mkdirs()) return@withContext null
+
+            var target = File(dir, sourceFile.name)
             // Never clobber an existing file; append a counter instead.
             var n = 1
             while (target.exists()) {
@@ -87,14 +101,14 @@ object SystemTrash {
                 target = File(dir, "$base ($n)$ext")
                 n++
             }
-            if (!TrashStore.moveFile(sourceFile, target)) return@withContext false
+            if (!TrashStore.moveFile(sourceFile, target)) return@withContext null
             android.media.MediaScannerConnection.scanFile(
                 context,
                 arrayOf(target.absolutePath),
                 arrayOf(entry.mimeType),
                 null
             )
-            true
+            target.absolutePath
         }
 
     /** Permanently deletes an entry directly on the filesystem. */
@@ -110,20 +124,7 @@ object SystemTrash {
         val result = ArrayList<Entry>()
         QUERY_COLLECTIONS.forEach { (uri, kind) ->
             runCatching {
-                context.contentResolver.query(
-                    uri,
-                    arrayOf(
-                        MediaStore.MediaColumns._ID,
-                        MediaStore.MediaColumns.DISPLAY_NAME,
-                        MediaStore.MediaColumns.MIME_TYPE,
-                        MediaStore.MediaColumns.SIZE,
-                        MediaStore.MediaColumns.DATE_ADDED,
-                        MediaStore.MediaColumns.DATA
-                    ),
-                    "${MediaStore.MediaColumns.IS_TRASHED}=1",
-                    null,
-                    "${MediaStore.MediaColumns.DATE_ADDED} DESC"
-                )?.use { cursor ->
+                trashQuery(context, uri)?.use { cursor ->
                     val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
                     val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
                     val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
@@ -161,20 +162,7 @@ object SystemTrash {
     private fun queryAllFilesTrash(context: Context): List<Entry> {
         val allUri = MediaStore.Files.getContentUri("external")
         val result = ArrayList<Entry>()
-        context.contentResolver.query(
-            allUri,
-            arrayOf(
-                MediaStore.MediaColumns._ID,
-                MediaStore.MediaColumns.DISPLAY_NAME,
-                MediaStore.MediaColumns.MIME_TYPE,
-                MediaStore.MediaColumns.SIZE,
-                MediaStore.MediaColumns.DATE_ADDED,
-                MediaStore.MediaColumns.DATA
-            ),
-            "${MediaStore.MediaColumns.IS_TRASHED}=1",
-            null,
-            "${MediaStore.MediaColumns.DATE_ADDED} DESC"
-        )?.use { cursor ->
+        trashQuery(context, allUri)?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
             val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
             val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
@@ -208,6 +196,44 @@ object SystemTrash {
         MediaStore.Images.Media.EXTERNAL_CONTENT_URI to MediaKind.IMAGE,
         MediaStore.Video.Media.EXTERNAL_CONTENT_URI to MediaKind.VIDEO,
         MediaStore.Audio.Media.EXTERNAL_CONTENT_URI to MediaKind.AUDIO
+    )
+
+    /**
+     * Runs a trash-only query against a MediaStore collection.
+     *
+     * Since Android 11 the provider drops trashed rows from every query unless
+     * the caller passes [MediaStore.QUERY_ARG_MATCH_TRASHED] in the query args
+     * Bundle — a raw `IS_TRASHED=1` selection returns nothing on many devices,
+     * which is why non-media files (APKs, documents) never showed up here.
+     * MATCH_ONLY is the documented argument; if a provider rejects it we fall
+     * back to the selection form so older builds still behave as before.
+     */
+    private fun trashQuery(context: Context, uri: Uri): android.database.Cursor? {
+        val bundle = android.os.Bundle().apply {
+            putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+        }
+        val viaArgs = runCatching {
+            context.contentResolver.query(uri, PROJECTION, bundle, null)
+        }.getOrNull()
+        if (viaArgs != null) return viaArgs
+        return runCatching {
+            context.contentResolver.query(
+                uri,
+                PROJECTION,
+                "${MediaStore.MediaColumns.IS_TRASHED}=1",
+                null,
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+            )
+        }.getOrNull()
+    }
+
+    private val PROJECTION = arrayOf(
+        MediaStore.MediaColumns._ID,
+        MediaStore.MediaColumns.DISPLAY_NAME,
+        MediaStore.MediaColumns.MIME_TYPE,
+        MediaStore.MediaColumns.SIZE,
+        MediaStore.MediaColumns.DATE_ADDED,
+        MediaStore.MediaColumns.DATA
     )
 
     /**

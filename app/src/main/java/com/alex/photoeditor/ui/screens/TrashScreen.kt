@@ -9,8 +9,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,9 +25,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
@@ -33,7 +38,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.RestoreFromTrash
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -53,7 +58,6 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.PlainTooltip
@@ -83,15 +87,23 @@ import java.util.Locale
  * apps and non-media files show up here too.
  *
  * System-trashed media are restored through the system's own restore thunk
- * ([restoreFromTrash]); filesystem-only items have no known original
- * location, so restoring moves them to the shared-storage root.
+ * (createTrashRequest, with quiet-provider and filesystem fallbacks);
+ * filesystem-only items have no known original location, so restoring moves
+ * them to Downloads/Edit by Alex Restored/.
+ *
+ * The top bar has a circular select-all toggle; long names wrap so rows grow
+ * rather than clip. Selecting files reveals a bucket action (DeleteSweep)
+ * that erases the selection permanently.
  */
 @Composable
 fun TrashScreen(vm: GalleryViewModel) {
     val safeArea = rememberSafeArea()
     val context = LocalContext.current
-    var showEmptyConfirm by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf<TrashRowData?>(null) }
+    var previewRow by remember { mutableStateOf<TrashRowData?>(null) }
+    var selectedIds by remember { mutableStateOf(emptySet<String>()) }
+    var confirmDeleteSelected by remember { mutableStateOf(false) }
+    val selectionMode = selectedIds.isNotEmpty()
 
     LaunchedEffect(Unit) { vm.refreshTrash() }
 
@@ -103,6 +115,43 @@ fun TrashScreen(vm: GalleryViewModel) {
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             vm.refreshTrash()
             vm.refresh()
+        } else {
+            android.widget.Toast.makeText(
+                context,
+                "Restore didn't complete. If this file was trashed by another app, restore it from that app.",
+                android.widget.Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    // System-trashed items restore in stages inside the VM: a quiet provider
+    // untrash, a filesystem move, then (as a last resort) the system's own
+    // restore request — which throws synchronously for files owned by another
+    // app, so it is built here, wrapped in runCatching.
+    fun restore(row: TrashRowData) {
+        when {
+            row.fromThisApp -> row.appEntry?.let { vm.restoreTrashEntry(it.id) }
+            row.systemEntry != null -> {
+                val entry = row.systemEntry
+                vm.restoreSystemTrashEntry(entry) { fallbackEntry ->
+                    val sender = runCatching {
+                        android.provider.MediaStore.createTrashRequest(
+                            context.contentResolver,
+                            listOf(fallbackEntry.uri!!),
+                            false
+                        )
+                    }.getOrNull()
+                    if (sender != null) {
+                        restoreLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                    } else {
+                        android.widget.Toast.makeText(
+                            context,
+                            "Restore blocked by the system for this file. Restore it from the Files app.",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
         }
     }
 
@@ -144,6 +193,13 @@ fun TrashScreen(vm: GalleryViewModel) {
         }.sortedByDescending { it.dateSeconds }
     }
 
+    // Drop selections that no longer exist (e.g. after a delete or refresh).
+    LaunchedEffect(rows) {
+        if (selectedIds.isNotEmpty()) {
+            selectedIds = selectedIds intersect rows.map { it.id }.toSet()
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -153,7 +209,7 @@ fun TrashScreen(vm: GalleryViewModel) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 4.dp, vertical = 4.dp),
+                .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             NamedActionIconButton(
@@ -167,11 +223,30 @@ fun TrashScreen(vm: GalleryViewModel) {
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier.weight(1f).padding(start = 4.dp)
             )
-            if (rows.isNotEmpty()) {
-                TextButton(onClick = { showEmptyConfirm = true }) {
-                    Text("Empty trash")
-                }
+            Spacer(Modifier.width(4.dp))
+            if (selectionMode) {
+                Text(
+                    "${selectedIds.size} selected",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
                 Spacer(Modifier.width(4.dp))
+                NamedActionIconButton(
+                    name = "Delete selected forever",
+                    icon = Icons.Filled.DeleteSweep,
+                    onClick = { confirmDeleteSelected = true },
+                    tint = MaterialTheme.colorScheme.error
+                )
+            }
+            if (rows.isNotEmpty()) {
+                CircleCheckToggle(
+                    checked = selectedIds.size == rows.size,
+                    onClick = {
+                        selectedIds =
+                            if (selectedIds.size == rows.size) emptySet() else rows.map { it.id }.toSet()
+                    },
+                    name = "Select all / none"
+                )
             }
         }
 
@@ -218,24 +293,30 @@ fun TrashScreen(vm: GalleryViewModel) {
                 items(rows, key = { it.id }) { row ->
                     TrashRow(
                         row = row,
-                        onRestore = {
-                            when {
-                                row.fromThisApp -> row.appEntry?.let { vm.restoreTrashEntry(it.id) }
-                                // Media items go through the system's own restore;
-                                // filesystem-only items move back to the shared root.
-                                row.systemEntry?.uri != null -> {
-                                    val entry = row.systemEntry
-                                    val sender = android.provider.MediaStore.createTrashRequest(
-                                        context.contentResolver,
-                                        listOf(entry.uri),
-                                        false
-                                    )
-                                    restoreLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                        selectionMode = selectionMode,
+                        selected = row.id in selectedIds,
+                        onClick = {
+                            if (selectionMode) {
+                                selectedIds = if (row.id in selectedIds) {
+                                    selectedIds - row.id
+                                } else {
+                                    selectedIds + row.id
                                 }
-                                row.systemEntry != null ->
-                                    vm.restoreSystemTrashEntryFromFilesystem(row.systemEntry)
+                            } else if (isApkTrashFile(row.name, row.mimeType)) {
+                                // APK rows are not previewable while trashed.
+                                Unit
+                            } else {
+                                previewRow = row
                             }
                         },
+                        onLongPress = {
+                            selectedIds = if (row.id in selectedIds) {
+                                selectedIds - row.id
+                            } else {
+                                selectedIds + row.id
+                            }
+                        },
+                        onRestore = { restore(row) },
                         onDeleteForever = { confirmDelete = row }
                     )
                 }
@@ -243,25 +324,50 @@ fun TrashScreen(vm: GalleryViewModel) {
         }
     }
 
-    if (showEmptyConfirm) {
+    previewRow?.let { row ->
+        TrashPreviewOverlay(
+            row = row,
+            onClose = { previewRow = null },
+            onRestore = {
+                restore(row)
+                previewRow = null
+            },
+            onDeleteForever = {
+                when {
+                    row.fromThisApp -> row.appEntry?.let { vm.deleteTrashEntryForever(it.id) }
+                    else -> row.systemEntry?.let { vm.deleteSystemTrashEntryForever(it) }
+                }
+                previewRow = null
+            }
+        )
+    }
+
+    if (confirmDeleteSelected) {
+        val selectedRows = rows.filter { it.id in selectedIds }
         AlertDialog(
-            onDismissRequest = { showEmptyConfirm = false },
-            title = { Text("Empty Trash?") },
+            onDismissRequest = { confirmDeleteSelected = false },
+            title = { Text("Delete selected permanently?") },
             text = {
-                Text("${rows.size} ${if (rows.size == 1) "file" else "files"} will be deleted permanently. This cannot be undone.")
+                Text("${selectedRows.size} ${if (selectedRows.size == 1) "file" else "files"} will be deleted permanently. This cannot be undone.")
             },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        showEmptyConfirm = false
-                        vm.emptyTrash()
+                        confirmDeleteSelected = false
+                        selectedRows.forEach { row ->
+                            when {
+                                row.fromThisApp -> row.appEntry?.let { vm.deleteTrashEntryForever(it.id) }
+                                else -> row.systemEntry?.let { vm.deleteSystemTrashEntryForever(it) }
+                            }
+                        }
+                        selectedIds = emptySet()
                     }
                 ) {
                     Text("Delete forever", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showEmptyConfirm = false }) {
+                TextButton(onClick = { confirmDeleteSelected = false }) {
                     Text("Cancel")
                 }
             }
@@ -298,7 +404,7 @@ fun TrashScreen(vm: GalleryViewModel) {
 }
 
 /** A unified row model merging app-binned and system-trashed items. */
-private data class TrashRowData(
+internal data class TrashRowData(
     val id: String,
     val name: String,
     val mimeType: String,
@@ -315,14 +421,22 @@ private data class TrashRowData(
 @Composable
 private fun TrashRow(
     row: TrashRowData,
+    selectionMode: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongPress: () -> Unit,
     onRestore: () -> Unit,
     onDeleteForever: () -> Unit
 ) {
+    val context = LocalContext.current
     val thumb by produceState<Bitmap?>(initialValue = null, row.appEntry?.storedPath, row.systemEntry?.path) {
         value = withContext(Dispatchers.IO) {
             val path = row.appEntry?.storedPath ?: row.systemEntry?.path
             path?.let { decodeImageFile(it, 256) }
         }
+    }
+    val apkIcon by produceState<Bitmap?>(initialValue = null, row.id) {
+        value = withContext(Dispatchers.IO) { loadApkIcon(context, row) }
     }
     val dateText = remember(row.dateSeconds) {
         SimpleDateFormat("d MMM yyyy", Locale.getDefault()).format(Date(row.dateSeconds * 1000))
@@ -334,9 +448,24 @@ private fun TrashRow(
             .padding(horizontal = 12.dp, vertical = 5.dp)
             .clip(RoundedCornerShape(16.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongPress
+            )
+            .semantics {
+                contentDescription = when {
+                    selectionMode -> if (selected) "Deselect ${row.name}" else "Select ${row.name}"
+                    isApkTrashFile(row.name, row.mimeType) -> "APK ${row.name} — restore to open"
+                    else -> "Preview ${row.name}"
+                }
+            }
             .padding(horizontal = 8.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (selectionMode) {
+            SelectionCircle(selected = selected)
+            Spacer(Modifier.width(10.dp))
+        }
         Box(
             modifier = Modifier
                 .size(54.dp)
@@ -345,12 +474,22 @@ private fun TrashRow(
             contentAlignment = Alignment.Center
         ) {
             val bitmap = thumb
+            val appIcon = apkIcon
             if (bitmap != null) {
                 Image(
                     bitmap = bitmap.asImageBitmap(),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
+                )
+            } else if (appIcon != null) {
+                Image(
+                    bitmap = appIcon.asImageBitmap(),
+                    contentDescription = "App icon",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(4.dp)
                 )
             } else {
                 Icon(
@@ -373,12 +512,11 @@ private fun TrashRow(
             Text(
                 row.name,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                "${formatSize(row.sizeBytes)} · $dateText · ${if (row.fromThisApp) "deleted here" else "device trash"}",
+                (if (isApkTrashFile(row.name, row.mimeType)) "APK · " else "") +
+                    "${formatSize(row.sizeBytes)} · $dateText · ${if (row.fromThisApp) "deleted here" else "device trash"}",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1
@@ -392,7 +530,8 @@ private fun TrashRow(
         ) {
             OutlinedButton(
                 onClick = onRestore,
-                modifier = Modifier.padding(end = 4.dp)
+                modifier = Modifier.padding(end = 2.dp),
+                contentPadding = PaddingValues(horizontal = 10.dp)
             ) {
                 Text("Restore")
             }
@@ -402,16 +541,75 @@ private fun TrashRow(
             tooltip = { PlainTooltip { Text("Delete forever — this cannot be undone") } },
             state = rememberTooltipState()
         ) {
-            IconButton(
+            OutlinedButton(
                 onClick = onDeleteForever,
-                modifier = Modifier.semantics { contentDescription = "Delete ${row.name} forever" }
+                modifier = Modifier.semantics { contentDescription = "Delete ${row.name} forever" },
+                contentPadding = PaddingValues(horizontal = 8.dp),
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = MaterialTheme.colorScheme.error
+                )
             ) {
                 Icon(
                     Icons.Filled.DeleteForever,
                     contentDescription = null,
-                    tint = MaterialTheme.colorScheme.error
+                    modifier = Modifier.size(18.dp)
                 )
             }
+        }
+    }
+}
+
+/** Filled circle + tick when selected, hollow circle when not. Mirrors [GalleryScreen]'s badge. */
+@Composable
+private fun SelectionCircle(selected: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(26.dp)
+            .clip(CircleShape)
+            .background(
+                if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        if (selected) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(17.dp)
+            )
+        }
+    }
+}
+
+/** Circular toggle matching [SelectionCircle]: filled + tick when on, hollow when off. */
+@Composable
+private fun CircleCheckToggle(
+    checked: Boolean,
+    onClick: () -> Unit,
+    name: String
+) {
+    val background = if (checked) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.outlineVariant
+    }
+    Box(
+        modifier = Modifier
+            .size(24.dp)
+            .clip(CircleShape)
+            .background(background)
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = name },
+        contentAlignment = Alignment.Center
+    ) {
+        if (checked) {
+            Icon(
+                Icons.Filled.Check,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(14.dp)
+            )
         }
     }
 }

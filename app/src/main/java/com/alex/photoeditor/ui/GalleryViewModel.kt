@@ -15,6 +15,7 @@ import com.alex.photoeditor.core.TrashStore
 import com.alex.photoeditor.core.UserFolders
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Tabs in the gallery screen. */
 enum class GalleryTab(val label: String, val kind: MediaKind) {
@@ -165,13 +166,75 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Moves a filesystem-only system item back to the shared-storage root. */
-    fun restoreSystemTrashEntryFromFilesystem(entry: SystemTrash.Entry) {
+    /**
+     * Restores a system-trashed entry, trying the strongest route first.
+     *  1. Direct provider update (IS_TRASHED=0) — silent, works when all-files
+     *     access is honored, puts the file back in its original location and
+     *     clears the trash row in one step.
+     *  2. Filesystem move to Downloads/Edit by Alex Restored/ — for trash this
+     *     app can read.
+     *  3. The system's own restore request (an IntentSender dialog, built by
+     *     the caller through [onFallback]) — the only path for files owned
+     *     by another app.
+     */
+    fun restoreSystemTrashEntry(
+        entry: SystemTrash.Entry,
+        onFallback: ((SystemTrash.Entry) -> Unit)? = null
+    ) {
+        val app = getApplication<android.app.Application>()
         viewModelScope.launch(Dispatchers.IO) {
-            val ok = SystemTrash.restoreFromFilesystem(getApplication(), entry)
-            if (ok) {
+            var detail: String? = null
+            if (entry.uri != null) {
+                val result = runCatching {
+                    app.contentResolver.update(
+                        entry.uri,
+                        android.content.ContentValues().apply {
+                            put(android.provider.MediaStore.MediaColumns.IS_TRASHED, 0)
+                        },
+                        null,
+                        null
+                    )
+                }
+                val rows = result.getOrNull() ?: -1
+                if (rows > 0) {
+                    refreshTrash()
+                    refresh()
+                    withContext(Dispatchers.Main) {
+                        android.widget.Toast.makeText(
+                            app,
+                            "Restored ${entry.name}",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                    return@launch
+                }
+                detail = result.exceptionOrNull()?.message?.take(120) ?: "provider returned $rows"
+            }
+
+            val destination = SystemTrash.restoreFromFilesystem(app, entry)
+            if (destination != null) {
                 refreshTrash()
                 refresh()
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        app,
+                        "Restored to $destination",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+                return@launch
+            }
+
+            if (onFallback != null && entry.uri != null) {
+                withContext(Dispatchers.Main) { onFallback(entry) }
+            } else {
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        app,
+                        "Couldn't restore this file. ${detail ?: "It was trashed by another app — restore it from the Files app."}",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
             }
         }
     }

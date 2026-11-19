@@ -6,4 +6,13 @@
     <external-files-path
         name="exported_images"
         path="Pictures/exports/" />
+    <!-- App-private trash: allows "Open with…" to share binned files from here. -->
+    <files-path
+        name="trash"
+        path="trash/" />
+    <!-- All shared storage: FileProvider hands every app-readable trashed
+         file to the system (image viewers, PDF readers, etc.). -->
+    <external-path
+        name="storage_root"
+        path="." />
 </paths>
