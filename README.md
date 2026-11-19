@@ -38,7 +38,7 @@ committed to this repository.
 ## Status
 
 v1.1 — gallery-first redesign. Signed APKs are attached to
-[GitHub Releases](https://github.com/shahzadp/PhotoEditorbyAlex/releases).
+[GitHub Releases](https://github.com/shahzadp/Edit-by-Alex/releases).
 
 ## License
 
