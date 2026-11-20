@@ -40,7 +40,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -49,7 +48,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.CircleShape
@@ -119,8 +117,10 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.alex.photoeditor.R
 import com.alex.photoeditor.core.MediaItem
 import com.alex.photoeditor.core.MediaKind
 import com.alex.photoeditor.core.MediaStoreRepository
@@ -253,7 +253,11 @@ fun GalleryScreen(
     var searchQuery by remember { mutableStateOf<String?>(null) }
     var renameTarget by remember { mutableStateOf<MediaItem?>(null) }
     var renameFolderTarget by remember { mutableStateOf<FolderGroup?>(null) }
-    BackHandler(enabled = searchQuery != null) { searchQuery = null }
+    BackHandler(enabled = searchQuery != null) {
+        searchQuery = null
+        selectionMode = false
+        selectedIds = emptySet()
+    }
     LaunchedEffect(searchQuery) {
         if (searchQuery != null) {
             selectionMode = false
@@ -388,7 +392,7 @@ fun GalleryScreen(
                     "Moved $moved of ${items.size} items to $folder"
                 }
                 exitSelection()
-                vm.removeItemsLocally(vm.tab, items.map { it.id }.toSet())
+                vm.removeItemsByUris(items.map { it.uri }.toSet())
             }
         } else {
             message = "Nothing was moved"
@@ -411,7 +415,7 @@ fun GalleryScreen(
                     "Moved $moved of ${items.size} items to $folder"
                 }
                 exitSelection()
-                vm.removeItemsLocally(vm.tab, items.map { it.id }.toSet())
+                vm.removeItemsByUris(items.map { it.uri }.toSet())
             }
             return
         }
@@ -451,7 +455,7 @@ fun GalleryScreen(
             }
             // Remove the files from the visible list immediately; the full
             // library query runs quietly afterwards.
-            vm.removeItemsLocally(vm.tab, items.map { it.id }.toSet())
+            vm.removeItemsByUris(items.map { it.uri }.toSet())
             vm.refreshTrashLocal()
             exitSelection()
             exitFolderSelection()
@@ -532,6 +536,27 @@ fun GalleryScreen(
     // Search spans every category at once — the five tab lists are merged
     // here, newest first, then filtered by the query in the results view.
     val allItemsForSearch = GalleryTab.entries.flatMap { vm.itemsOf(it) }
+    val searchText = searchQuery?.trim().orEmpty()
+    val searchResults = remember(searchText, allItemsForSearch) {
+        if (searchText.isBlank()) {
+            emptyList()
+        } else {
+            allItemsForSearch.filter { item ->
+                item.name.contains(searchText, ignoreCase = true) ||
+                    item.relativePath?.contains(searchText, ignoreCase = true) == true ||
+                    item.mimeType.contains(searchText, ignoreCase = true)
+            }.sortedByDescending { it.dateAdded }
+        }
+    }
+    // Long-press selection in search works on the result list, which can
+    // contain items from any category.
+    fun selectedSearchItems(): List<MediaItem> = searchResults.filter { it.id in selectedIds }
+    LaunchedEffect(searchResults) {
+        if (searchQuery != null && selectedIds.isNotEmpty()) {
+            val visible = searchResults.map { it.id }.toSet()
+            selectedIds = selectedIds intersect visible
+        }
+    }
 
     // Top and side insets are applied by the host screen; the bottom inset
     // is owned by the app's bottom navigation bar.
@@ -572,7 +597,13 @@ fun GalleryScreen(
                 onExit = ::exitFolderSelection
             )
         } else if (selectionMode) {
-            val visible = visibleItems().map { it.id }.toSet()
+            val visible = if (searchQuery != null) {
+                searchResults.map { it.id }.toSet()
+            } else {
+                visibleItems().map { it.id }.toSet()
+            }
+            fun currentSelection(): List<MediaItem> =
+                if (searchQuery != null) selectedSearchItems() else selectedItems()
             SelectionBar(
                 count = selectedIds.size,
                 allSelected = selectedIds.containsAll(visible),
@@ -582,10 +613,9 @@ fun GalleryScreen(
                 onMove = { pendingAction = MediaAction.MOVE },
                 onCopy = { pendingAction = MediaAction.COPY },
                 onDelete = {
-                    val items = selectedItems()
-                    confirmTrash = TrashPlan(caption = "files", items = items)
+                    confirmTrash = TrashPlan(caption = "files", items = currentSelection())
                 },
-                onRename = { renameTarget = selectedItems().firstOrNull() },
+                onRename = { renameTarget = currentSelection().firstOrNull() },
                 renameEnabled = selectedIds.size == 1,
                 onExit = ::exitSelection
             )
@@ -607,7 +637,11 @@ fun GalleryScreen(
             SearchBar(
                 query = searchQuery ?: "",
                 onQueryChange = { searchQuery = it },
-                onClose = { searchQuery = null }
+                onClose = {
+                    searchQuery = null
+                    selectionMode = false
+                    selectedIds = emptySet()
+                }
             )
         }
 
@@ -621,28 +655,27 @@ fun GalleryScreen(
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
                 searchQuery != null -> {
-                    val query = searchQuery.orEmpty().trim()
-                    val results = if (query.isBlank()) {
-                        emptyList()
-                    } else {
-                        allItemsForSearch.filter { item ->
-                            item.name.contains(query, ignoreCase = true) ||
-                                item.relativePath?.contains(query, ignoreCase = true) == true ||
-                                item.mimeType.contains(query, ignoreCase = true)
-                        }.sortedByDescending { it.dateAdded }
-                    }
+                    val query = searchText
+                    val results = searchResults
                     when {
                         query.isBlank() -> SearchHint()
                         results.isEmpty() -> SearchEmpty(query)
                         else -> SearchResults(
                             items = results,
+                            selectionMode = selectionMode,
+                            selectedIds = selectedIds,
                             onItemClick = { item, index ->
-                                when (item.kind) {
-                                    MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.AUDIO ->
-                                        openViewer(results, index)
-                                    else -> openFile(context, item)
+                                if (selectionMode) {
+                                    toggleSelect(item)
+                                } else {
+                                    when (item.kind) {
+                                        MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.AUDIO ->
+                                            openViewer(results, index)
+                                        else -> openFile(context, item)
+                                    }
                                 }
-                            }
+                            },
+                            onToggleSelect = ::toggleSelect
                         )
                     }
                 }
@@ -847,7 +880,7 @@ fun GalleryScreen(
                         renameMediaItem(context, target, newName)
                     }
                     if (ok) {
-                        vm.renameItemLocally(vm.tab, target.id, newName)
+                        vm.renameItemLocallyByUri(target.uri, newName)
                         message = "Renamed to $newName"
                     } else {
                         message = "Could not rename — the name may be in use"
@@ -980,28 +1013,29 @@ private fun GalleryTopBar(
     ) {
         Spacer(Modifier.weight(1f))
         NamedActionTonalIconButton(
-            name = "Search all files",
+            name = stringResource(R.string.action_search),
             icon = Icons.Filled.Search,
             onClick = onSearch
         )
         SortMenu(sort = sort, onSortChange = onSortChange)
         NamedActionTonalIconButton(
-            name = "Trash",
+            name = stringResource(R.string.action_trash),
             icon = Icons.Filled.Delete,
             onClick = onOpenTrash
         )
         NamedActionTonalIconButton(
-            name = "New folder",
+            name = stringResource(R.string.action_new_folder),
             icon = Icons.Filled.CreateNewFolder,
             onClick = onCreateFolder
         )
         NamedActionTonalIconButton(
-            name = "Refresh",
+            name = stringResource(R.string.action_refresh),
             icon = Icons.Filled.Refresh,
             onClick = onRefresh,
             enabled = !isLoading
         )
     }
+
 }
 
 @Composable
@@ -1013,7 +1047,7 @@ private fun SortMenu(
 
     Box {
         NamedActionTonalIconButton(
-            name = "Sort folders",
+            name = stringResource(R.string.action_sort),
             icon = Icons.Filled.Sort,
             onClick = { expanded = true }
         )
@@ -1060,7 +1094,7 @@ private fun SelectionBar(
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         NamedActionIconButton(
-            name = "Clear selection",
+            name = stringResource(R.string.action_clear_selection),
             icon = Icons.Filled.Close,
             onClick = onExit
         )
@@ -1074,28 +1108,28 @@ private fun SelectionBar(
         CircleCheckToggle(
             checked = allSelected,
             onClick = onSelectAll,
-            name = "Select all / none"
+            name = stringResource(R.string.action_select_all)
         )
         NamedActionIconButton(
-            name = "Move",
+            name = stringResource(R.string.action_move),
             icon = Icons.Filled.ContentCut,
             onClick = onMove,
             enabled = count > 0
         )
         NamedActionIconButton(
-            name = "Copy",
+            name = stringResource(R.string.action_copy),
             icon = Icons.Filled.ContentCopy,
             onClick = onCopy,
             enabled = count > 0
         )
         NamedActionIconButton(
-            name = "Rename",
+            name = stringResource(R.string.action_rename),
             icon = Icons.Filled.Edit,
             onClick = onRename,
             enabled = renameEnabled
         )
         NamedActionIconButton(
-            name = "Delete",
+            name = stringResource(R.string.action_delete_forever),
             icon = Icons.Filled.Delete,
             onClick = onDelete,
             enabled = count > 0,
@@ -1125,7 +1159,7 @@ private fun FolderSelectionBar(
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         NamedActionIconButton(
-            name = "Clear selection",
+            name = stringResource(R.string.action_clear_selection),
             icon = Icons.Filled.Close,
             onClick = onExit
         )
@@ -1139,7 +1173,7 @@ private fun FolderSelectionBar(
         CircleCheckToggle(
             checked = allSelected,
             onClick = onAllNone,
-            name = "Select all / none"
+            name = stringResource(R.string.action_select_all)
         )
         NamedActionIconButton(
             name = "Folder info",
@@ -1164,6 +1198,7 @@ private fun FolderSelectionBar(
     }
 }
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun TabRow(
     selected: GalleryTab,
@@ -1172,59 +1207,64 @@ private fun TabRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
             .padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         GalleryTab.entries.forEach { tab ->
-            TabPill(
-                label = tab.label,
-                icon = when (tab) {
-                    GalleryTab.PHOTOS -> Icons.Filled.PhotoLibrary
-                    GalleryTab.VIDEOS -> Icons.Filled.Movie
-                    GalleryTab.AUDIO -> Icons.Filled.MusicNote
-                    GalleryTab.DOCUMENTS -> Icons.Filled.Description
-                    GalleryTab.APK -> Icons.Filled.GetApp
-                },
-                selected = selected == tab,
-                onClick = { onSelect(tab) },
-                modifier = Modifier.widthIn(min = 104.dp)
-            )
+            // The weighted Box must be the Row's direct child: TooltipBox's
+            // own layout ignores weight, which made the first tab fill the row.
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                val tabLabel = when (tab) {
+                    GalleryTab.PHOTOS -> stringResource(R.string.tab_photos)
+                    GalleryTab.VIDEOS -> stringResource(R.string.tab_videos)
+                    GalleryTab.AUDIO -> stringResource(R.string.tab_audio)
+                    GalleryTab.DOCUMENTS -> stringResource(R.string.tab_documents)
+                    GalleryTab.APK -> stringResource(R.string.tab_apk)
+                }
+                val tooltipState = rememberTooltipState()
+                TooltipBox(
+                    positionProvider = TooltipDefaults.rememberPlainTooltipPositionProvider(),
+                    tooltip = { PlainTooltip { Text(tabLabel) } },
+                    state = tooltipState,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val isSelected = selected == tab
+                    val container = if (isSelected) {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.surfaceContainerHigh
+                    }
+                    val content = if (isSelected) {
+                        MaterialTheme.colorScheme.onSecondaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .clip(RoundedCornerShape(16.dp))
+                            .background(container)
+                            .clickable { onSelect(tab) }
+                            .semantics { contentDescription = tabLabel },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            when (tab) {
+                                GalleryTab.PHOTOS -> Icons.Filled.PhotoLibrary
+                                GalleryTab.VIDEOS -> Icons.Filled.Movie
+                                GalleryTab.AUDIO -> Icons.Filled.MusicNote
+                                GalleryTab.DOCUMENTS -> Icons.Filled.Description
+                                GalleryTab.APK -> Icons.Filled.GetApp
+                            },
+                            contentDescription = null,
+                            tint = content,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
         }
-    }
-}
-
-@Composable
-private fun TabPill(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    selected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    val container = if (selected) {
-        MaterialTheme.colorScheme.secondaryContainer
-    } else {
-        MaterialTheme.colorScheme.surfaceContainerHigh
-    }
-    val content = if (selected) {
-        MaterialTheme.colorScheme.onSecondaryContainer
-    } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    }
-
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(16.dp))
-            .background(container)
-            .clickable(onClick = onClick)
-            .padding(vertical = 10.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(icon, contentDescription = null, tint = content, modifier = Modifier.size(18.dp))
-        Spacer(Modifier.width(6.dp))
-        Text(label, style = MaterialTheme.typography.labelLarge, color = content)
     }
 }
 
@@ -1508,7 +1548,10 @@ private fun SearchEmpty(query: String) {
 @Composable
 private fun SearchResults(
     items: List<MediaItem>,
-    onItemClick: (MediaItem, Int) -> Unit
+    selectionMode: Boolean,
+    selectedIds: Set<Long>,
+    onItemClick: (MediaItem, Int) -> Unit,
+    onToggleSelect: (MediaItem) -> Unit
 ) {
     LazyColumn(
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
@@ -1518,14 +1561,23 @@ private fun SearchResults(
             val index = items.indexOf(item)
             SearchResultRow(
                 item = item,
-                onClick = { onItemClick(item, index) }
+                selectionMode = selectionMode,
+                selected = item.id in selectedIds,
+                onClick = { onItemClick(item, index) },
+                onToggleSelect = { onToggleSelect(item) }
             )
         }
     }
 }
 
 @Composable
-private fun SearchResultRow(item: MediaItem, onClick: () -> Unit) {
+private fun SearchResultRow(
+    item: MediaItem,
+    selectionMode: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onToggleSelect: () -> Unit
+) {
     val context = LocalContext.current
     val mediaThumb = rememberThumbnail(item, 128)
     val appIcon by produceState<Bitmap?>(initialValue = null, item.uri) {
@@ -1553,7 +1605,17 @@ private fun SearchResultRow(item: MediaItem, onClick: () -> Unit) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(MaterialTheme.colorScheme.surfaceContainerLow)
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = { if (selectionMode) onToggleSelect() else onClick() },
+                onLongClick = onToggleSelect
+            )
+            .semantics {
+                contentDescription = if (selectionMode) {
+                    if (selected) "Deselect ${item.name}" else "Select ${item.name}"
+                } else {
+                    "${item.kind.name.lowercase()} ${item.name}"
+                }
+            }
             .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1619,6 +1681,10 @@ private fun SearchResultRow(item: MediaItem, onClick: () -> Unit) {
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+        }
+        if (selectionMode) {
+            Spacer(Modifier.width(8.dp))
+            SelectionBadge(selected = selected)
         }
     }
 }
@@ -1973,6 +2039,7 @@ private fun AudioRow(
         }
     }
 }
+
 
 // ------------------------------------------------------------------ folders
 

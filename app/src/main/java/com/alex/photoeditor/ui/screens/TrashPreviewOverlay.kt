@@ -360,15 +360,22 @@ private fun VideoPreview(
             }
         }
 
-        // Bottom scrim with play position (within the 84dp bottom action bar)
-        Text(
-            formatPosition(position) + " / " + formatPosition(duration),
-            style = MaterialTheme.typography.labelSmall,
-            color = Color.White.copy(alpha = 0.75f),
+        // Time readout sits just above the action bar; a pill keeps it on
+        // one line even on narrow screens (large side padding used to wrap it).
+        Box(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 96.dp, start = 220.dp, end = 220.dp)
-        )
+                .padding(bottom = 92.dp)
+                .clip(androidx.compose.foundation.shape.RoundedCornerShape(50))
+                .background(Color.Black.copy(alpha = 0.55f))
+                .padding(horizontal = 12.dp, vertical = 4.dp)
+        ) {
+            Text(
+                formatPosition(position) + " / " + formatPosition(duration),
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White.copy(alpha = 0.75f)
+            )
+        }
     }
 }
 

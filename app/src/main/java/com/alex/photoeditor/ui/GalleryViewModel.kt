@@ -24,7 +24,7 @@ import kotlinx.coroutines.withContext
 enum class GalleryTab(val label: String, val kind: MediaKind) {
     PHOTOS("Photos", MediaKind.IMAGE),
     VIDEOS("Videos", MediaKind.VIDEO),
-    AUDIO("Audio", MediaKind.AUDIO),
+    AUDIO("Audios", MediaKind.AUDIO),
     DOCUMENTS("Documents", MediaKind.DOCUMENT),
     APK("APK", MediaKind.APK)
 }
@@ -106,6 +106,9 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
             val generation = (tabGenerations[tab] ?: 0) + 1
             tabGenerations[tab] = generation
             loadingMap[tab] = true
+            if (tab == GalleryTab.DOCUMENTS || tab == GalleryTab.APK) {
+                MediaStoreRepository.invalidateFileCache()
+            }
             val result = runCatching { MediaStoreRepository.query(getApplication(), tab.kind) }
             if (tabGenerations[tab] != generation) return@launch
             result.onSuccess { itemsMap[tab] = it }
@@ -116,6 +119,22 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     /** Removes items from a tab's current list immediately. */
     fun removeItemsLocally(tab: GalleryTab, ids: Set<Long>) {
         itemsMap[tab] = itemsMap[tab].orEmpty().filterNot { it.id in ids }
+    }
+
+    /** Removes items from every tab (search results can span categories). */
+    fun removeItemsByUris(uris: Set<android.net.Uri>) {
+        GalleryTab.entries.forEach { tab ->
+            itemsMap[tab] = itemsMap[tab].orEmpty().filterNot { it.uri in uris }
+        }
+    }
+
+    /** Shows a renamed item immediately, wherever it lives. */
+    fun renameItemLocallyByUri(uri: android.net.Uri, newName: String) {
+        GalleryTab.entries.forEach { tab ->
+            itemsMap[tab] = itemsMap[tab].orEmpty().map {
+                if (it.uri == uri) it.copy(name = newName) else it
+            }
+        }
     }
 
     /** Inserts a just-restored file into its tab immediately. */
@@ -447,6 +466,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         // cleanup app, rm) must not linger in the gallery's own bookkeeping.
         pruneStaleUserFolders()
         userFolders = UserFolders.list(getApplication())
+        MediaStoreRepository.invalidateFileCache()
         val generation = ++loadGeneration
         GalleryTab.entries.forEach { target ->
             loadingMap[target] = true

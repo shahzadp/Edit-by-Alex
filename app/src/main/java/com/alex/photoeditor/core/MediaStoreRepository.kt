@@ -17,6 +17,8 @@ import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import androidx.exifinterface.media.ExifInterface
 import java.util.Locale
@@ -81,6 +83,57 @@ object MediaStoreRepository {
 
     private const val MAX_ITEMS = 800
 
+    /**
+     * Documents and APKs are produced by one combined pass, shared by both
+     * tab queries launched during a refresh. Without this, every refresh
+     * scanned the same storage tree twice.
+     */
+    private data class FileScan(val at: Long, val docs: List<MediaItem>, val apks: List<MediaItem>)
+    private var fileScan: FileScan? = null
+    private val fileScanLock = Mutex()
+
+    /**
+     * Directory entries cache, keyed by path + directory mtime. Unchanged
+     * folders are never listed again; adding/removing/renaming a file changes
+     * mtime and naturally invalidates the entry.
+     */
+    private data class DirListing(val stamp: Long, val files: Array<java.io.File>)
+    private val dirCache = HashMap<String, DirListing>()
+
+    fun invalidateFileCache() {
+        fileScan = null
+    }
+
+    private suspend fun fileLists(context: Context): Pair<List<MediaItem>, List<MediaItem>> =
+        fileScanLock.withLock {
+            val cached = fileScan
+            if (cached != null && System.currentTimeMillis() - cached.at < 2_000L) {
+                return@withLock cached.docs to cached.apks
+            }
+            val lists = coroutineScope {
+                val disk = async(Dispatchers.IO) { queryFilesFromDisk(context) }
+                val provider = async(Dispatchers.IO) { queryFiles(context) }
+                listOf(disk.await(), provider.await())
+            }
+            fun merge(a: List<MediaItem>, b: List<MediaItem>): List<MediaItem> {
+                val seen = HashSet<String>()
+                return (a + b).filter { item ->
+                    val key = item.absolutePath ?: item.uri.toString()
+                    seen.add(key)
+                }
+            }
+            val combined = merge(lists[0], lists[1])
+            val result = FileScan(
+                System.currentTimeMillis(),
+                combined.filter { it.kind == MediaKind.DOCUMENT }
+                    .sortedByDescending { it.dateAdded },
+                combined.filter { it.kind == MediaKind.APK }
+                    .sortedByDescending { it.dateAdded }
+            )
+            fileScan = result
+            result.docs to result.apks
+        }
+
     /** SVGs rasterize into this maximum edge so they never eat the heap. */
     private const val SVG_MAX_EDGE = 2048
 
@@ -95,22 +148,10 @@ object MediaStoreRepository {
                 MediaKind.VIDEO -> queryCollection(context, kind)
                 MediaKind.AUDIO -> queryCollection(context, kind)
                 MediaKind.DOCUMENT, MediaKind.APK -> {
-                    // MediaStore is only one index and OEMs leave non-media
-                    // rows out of it. All-files access lets us walk shared
-                    // storage directly — that is the authoritative source,
-                    // with MediaStore rows merged for virtual/cloud files.
-                    val (fromDisk, fromProvider) = coroutineScope {
-                        val disk = async(Dispatchers.IO) { queryFilesFromDisk(context, kind) }
-                        val provider = async(Dispatchers.IO) { queryFiles(context, kind) }
-                        disk.await() to provider.await()
-                    }
-                    val seen = HashSet<String>()
-                    (fromDisk + fromProvider).filter { item ->
-                        val key = item.absolutePath
-                            ?: filePathFor(context, item)
-                            ?: item.uri.toString()
-                        seen.add(key)
-                    }
+                    // One combined scan serves both tabs; the result is reused
+                    // by the sibling tab query in the same refresh.
+                    val (docs, apks) = fileLists(context)
+                    if (kind == MediaKind.DOCUMENT) docs else apks
                 }
             }
         }
@@ -120,12 +161,8 @@ object MediaStoreRepository {
      * requires at launch, so documents and APKs appear with their real
      * folders even when MediaStore doesn't index non-media files.
      */
-    private fun queryFilesFromDisk(context: Context, kind: MediaKind): List<MediaItem> {
-        val extensions = if (kind == MediaKind.APK) {
-            setOf("apk")
-        } else {
-            DOCUMENT_EXTENSIONS.toSet()
-        }
+    private fun queryFilesFromDisk(context: Context): List<MediaItem> {
+        val extensions = DOCUMENT_EXTENSIONS.toSet() + "apk"
         val roots = mutableListOf<java.io.File>(FolderMaker.sharedStorageRoot())
         context.getExternalFilesDirs(null).drop(1).forEach { appDir ->
             appDir?.parentFile?.parentFile?.parentFile?.let(roots::add)
@@ -142,7 +179,15 @@ object MediaStoreRepository {
                 if (depth > 3 || result.size >= MAX_FILES_ITEMS ||
                     System.currentTimeMillis() > deadline
                 ) return
-                val children = runCatching { dir.listFiles() }.getOrNull() ?: return
+                val stamp = runCatching { dir.lastModified() }.getOrDefault(0L)
+                val cached = synchronized(dirCache) { dirCache[dir.absolutePath] }
+                val children = if (cached != null && cached.stamp == stamp) {
+                    cached.files
+                } else {
+                    val fresh = runCatching { dir.listFiles() }.getOrNull() ?: return
+                    synchronized(dirCache) { dirCache[dir.absolutePath] = DirListing(stamp, fresh) }
+                    fresh
+                }
                 children.forEach { file ->
                     when {
                         file.isDirectory -> {
@@ -157,6 +202,7 @@ object MediaStoreRepository {
                         file.isFile -> {
                             val ext = file.name.substringAfterLast('.', "").lowercase(Locale.US)
                             if (ext !in extensions) return@forEach
+                            val itemKind = if (ext == "apk") MediaKind.APK else MediaKind.DOCUMENT
                             val path = file.absolutePath
                             if (!seen.add(path)) return@forEach
                             val parent = file.parentFile ?: return@forEach
@@ -174,9 +220,13 @@ object MediaStoreRepository {
                                 MediaItem(
                                     id = path.hashCode().toLong(),
                                     uri = uri,
-                                    kind = kind,
+                                    kind = itemKind,
                                     name = file.name,
-                                    mimeType = SystemTrash.mimeTypeForName(file.name),
+                                    mimeType = if (itemKind == MediaKind.APK) {
+                                        "application/vnd.android.package-archive"
+                                    } else {
+                                        SystemTrash.mimeTypeForName(file.name)
+                                    },
                                     sizeBytes = file.length(),
                                     dateAdded = file.lastModified() / 1000,
                                     dateModified = file.lastModified() / 1000,
@@ -220,11 +270,8 @@ object MediaStoreRepository {
      * match mode, and explicitly filtered on Android 11+ where the column
      * exists.
      */
-    private fun queryFiles(context: Context, kind: MediaKind): List<MediaItem> {
-        val extensions = when (kind) {
-            MediaKind.APK -> listOf("apk")
-            else -> DOCUMENT_EXTENSIONS
-        }
+    private fun queryFiles(context: Context): List<MediaItem> {
+        val extensions = DOCUMENT_EXTENSIONS + "apk"
         val byExtension = extensions.joinToString(" OR ") {
             "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE '%.${it}'"
         }
@@ -235,20 +282,17 @@ object MediaStoreRepository {
         val selection = buildString {
             append("(")
             append(byExtension)
-            if (kind == MediaKind.APK) {
-                append(" OR ${MediaStore.MediaColumns.MIME_TYPE}='application/vnd.android.package-archive'")
-            } else {
-                append(
+            append(
+                " OR ${MediaStore.MediaColumns.MIME_TYPE}='application/vnd.android.package-archive'" +
                     " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'text/%'" +
-                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/pdf'" +
-                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/msword'" +
-                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/vnd.ms-%'" +
-                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/vnd.openxmlformats-%'" +
-                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/epub%'" +
-                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/zip'" +
-                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/x-7z%'"
-                )
-            }
+                    " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/pdf'" +
+                    " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/msword'" +
+                    " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/vnd.ms-%'" +
+                    " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/vnd.openxmlformats-%'" +
+                    " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/epub%'" +
+                    " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/zip'" +
+                    " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/x-7z%'"
+            )
             append(")")
         }
 
@@ -330,13 +374,17 @@ object MediaStoreRepository {
                             ?: data?.let(::relativeDirectoryFromData)
                         val bucket = (if (bucketCol >= 0) c.getString(bucketCol) else null)
                             ?: relative?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+                        val mime = c.getString(mimeCol)
+                        val itemKind = if (name.endsWith(".apk", ignoreCase = true) ||
+                            mime == "application/vnd.android.package-archive"
+                        ) MediaKind.APK else MediaKind.DOCUMENT
                         items.add(
                             MediaItem(
                                 id = id,
                                 uri = itemUri,
-                                kind = kind,
+                                kind = itemKind,
                                 name = name,
-                                mimeType = c.getString(mimeCol)
+                                mimeType = mime
                                     ?.takeIf { it.isNotBlank() && it != "application/octet-stream" }
                                     ?: SystemTrash.mimeTypeForName(name),
                                 sizeBytes = c.getLong(sizeCol),
@@ -353,7 +401,8 @@ object MediaStoreRepository {
                                 } else null,
                                 title = null,
                                 artist = null,
-                                album = null
+                                album = null,
+                                absolutePath = data
                             )
                         )
                     }

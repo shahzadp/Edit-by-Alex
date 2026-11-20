@@ -57,6 +57,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -64,6 +65,7 @@ import androidx.compose.material3.TooltipBox
 import androidx.compose.material3.PlainTooltip
 import androidx.compose.material3.rememberTooltipState
 import androidx.compose.material3.TooltipDefaults
+import com.alex.photoeditor.R
 import com.alex.photoeditor.core.MediaKind
 import com.alex.photoeditor.core.SystemTrash
 import com.alex.photoeditor.core.TrashStore
@@ -219,7 +221,7 @@ fun TrashScreen(vm: GalleryViewModel) {
                 onClick = vm::closeTrash
             )
             Text(
-                "Trash",
+                stringResource(R.string.title_trash),
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
                 modifier = Modifier
@@ -586,7 +588,7 @@ private fun TrashRow(
                 modifier = Modifier.padding(end = 2.dp),
                 contentPadding = PaddingValues(horizontal = 10.dp)
             ) {
-                Text("Restore")
+                Text(stringResource(R.string.action_restore))
             }
         }
         TooltipBox(

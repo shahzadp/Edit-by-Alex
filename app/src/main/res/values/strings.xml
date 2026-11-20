@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Edit by Alex</string>
+
+    <string name="tab_photos">Photos</string>
+    <string name="tab_videos">Videos</string>
+    <string name="tab_audio">Audios</string>
+    <string name="tab_documents">Documents</string>
+    <string name="tab_apk">APK</string>
+
+    <string name="action_search">Search all files</string>
+    <string name="action_sort">Sort folders</string>
+    <string name="action_trash">Trash</string>
+    <string name="action_new_folder">New folder</string>
+    <string name="action_refresh">Refresh</string>
+
+    <string name="title_gallery">Gallery</string>
+    <string name="title_editor">Editor</string>
+    <string name="title_trash">Trash</string>
+
+    <string name="action_restore">Restore</string>
+    <string name="action_delete_forever">Delete forever</string>
+    <string name="action_rename">Rename</string>
+    <string name="action_move">Move</string>
+    <string name="action_copy">Copy</string>
+    <string name="action_delete_selected">Delete selected forever</string>
+    <string name="action_select_all">Select all / none</string>
+    <string name="action_clear_selection">Clear selection</string>
+
+    <string name="trash_empty">Trash is empty</string>
+    <string name="trash_empty_body">Anything deleted here and anything in your device\'s trash ends up in this screen.</string>
+
+    <string name="onboarding_welcome">Welcome to Edit by Alex</string>
+    <string name="onboarding_body">Two system permissions let the app browse your files and install APKs you find. You\'ll only be asked once.</string>
+    <string name="onboarding_storage_title">Full file access</string>
+    <string name="onboarding_storage_body">Needed to browse, organise and edit every file on this device.</string>
+    <string name="onboarding_install_title">Install APKs</string>
+    <string name="onboarding_install_body">Needed so APK files you tap can be installed with the system installer.</string>
+    <string name="onboarding_start">Get started</string>
+    <string name="onboarding_allowed">Allowed</string>
+    <string name="onboarding_enable">Enable in settings</string>
+    <string name="onboarding_grant">Grant access</string>
+    <string name="onboarding_allow">Allow in settings</string>
+    <string name="onboarding_hint">Grant both permissions above to continue.</string>
+</resources>

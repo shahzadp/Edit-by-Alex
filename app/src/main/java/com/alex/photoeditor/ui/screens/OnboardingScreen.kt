@@ -46,6 +46,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -146,7 +147,7 @@ fun OnboardingScreen(onFinished: () -> Unit) {
             )
             Spacer(Modifier.height(18.dp))
             Text(
-                "Welcome to Edit by Alex",
+                stringResource(R.string.onboarding_welcome),
                 style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center
@@ -163,7 +164,7 @@ fun OnboardingScreen(onFinished: () -> Unit) {
             PermissionCard(
                 granted = storageGranted,
                 icon = Icons.Filled.Storage,
-                title = "Full file access",
+                title = stringResource(R.string.onboarding_storage_title),
                 description = "Needed to browse, organise and edit every file on this device.",
                 buttonLabel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                     "Enable in settings"
@@ -176,7 +177,7 @@ fun OnboardingScreen(onFinished: () -> Unit) {
             PermissionCard(
                 granted = installGranted,
                 icon = Icons.Filled.GetApp,
-                title = "Install APKs",
+                title = stringResource(R.string.onboarding_install_title),
                 description = "Needed so APK files you tap can be installed with the system installer.",
                 buttonLabel = "Allow in settings",
                 onClick = ::openInstallSettings
@@ -190,7 +191,7 @@ fun OnboardingScreen(onFinished: () -> Unit) {
                 enabled = storageGranted && installGranted,
                 modifier = Modifier.width(200.dp)
             ) {
-                Text("Get started")
+                Text(stringResource(R.string.onboarding_start))
             }
             if (!storageGranted || !installGranted) {
                 Spacer(Modifier.height(10.dp))

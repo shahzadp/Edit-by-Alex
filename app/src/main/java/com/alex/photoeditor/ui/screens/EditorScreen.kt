@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
@@ -387,7 +388,7 @@ private fun AppBottomNavBar(
             selected = gallerySelected,
             onClick = onSelectGallery,
             icon = { Icon(Icons.Filled.PhotoLibrary, contentDescription = null) },
-            label = { Text("Gallery") },
+            label = { Text(stringResource(R.string.title_gallery)) },
             alwaysShowLabel = true,
             modifier = Modifier.semantics { contentDescription = "Gallery" },
             colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
@@ -402,7 +403,7 @@ private fun AppBottomNavBar(
             selected = !gallerySelected,
             onClick = onSelectEditor,
             icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
-            label = { Text("Editor") },
+            label = { Text(stringResource(R.string.title_editor)) },
             alwaysShowLabel = true,
             modifier = Modifier.semantics { contentDescription = "Editor" },
             colors = androidx.compose.material3.NavigationBarItemDefaults.colors(
