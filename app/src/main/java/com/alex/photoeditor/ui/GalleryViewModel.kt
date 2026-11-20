@@ -1,6 +1,7 @@
 package com.alex.photoeditor.ui
 
 import android.app.Application
+import androidx.core.content.FileProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -11,9 +12,11 @@ import com.alex.photoeditor.core.MediaItem
 import com.alex.photoeditor.core.MediaKind
 import com.alex.photoeditor.core.MediaStoreRepository
 import com.alex.photoeditor.core.SystemTrash
+import com.alex.photoeditor.core.StorageCleanup
 import com.alex.photoeditor.core.TrashStore
 import com.alex.photoeditor.core.UserFolders
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -89,8 +92,137 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         get() = trashEntries.sumOf { it.sizeBytes } + systemTrashItems.sumOf { it.sizeBytes }
 
     private var loadGeneration = 0
+    private val tabGenerations = HashMap<GalleryTab, Int>()
+
+    /**
+     * Re-queries ONE tab. Only needed when an operation creates a new file
+     * (a copy) whose exact metadata we don't know locally. Ordinary edits,
+     * deletes and restores update the visible list in place and never call
+     * this — that was the source of unnecessary loading.
+     */
+    fun refreshTab(tab: GalleryTab, delayMs: Long = 600) {
+        viewModelScope.launch {
+            delay(delayMs)
+            val generation = (tabGenerations[tab] ?: 0) + 1
+            tabGenerations[tab] = generation
+            loadingMap[tab] = true
+            val result = runCatching { MediaStoreRepository.query(getApplication(), tab.kind) }
+            if (tabGenerations[tab] != generation) return@launch
+            result.onSuccess { itemsMap[tab] = it }
+            loadingMap[tab] = false
+        }
+    }
+
+    /** Removes items from a tab's current list immediately. */
+    fun removeItemsLocally(tab: GalleryTab, ids: Set<Long>) {
+        itemsMap[tab] = itemsMap[tab].orEmpty().filterNot { it.id in ids }
+    }
+
+    /** Inserts a just-restored file into its tab immediately. */
+    fun addRestoredItem(entry: TrashStore.TrashEntry, destination: String) {
+        val file = java.io.File(destination)
+        val kind = runCatching { MediaKind.valueOf(entry.kind) }.getOrNull()
+            ?: MediaKind.DOCUMENT
+        val parent = file.parentFile
+        val root = com.alex.photoeditor.core.FolderMaker.sharedStorageRoot().absolutePath
+        val relative = parent?.absolutePath?.removePrefix(root)?.trimStart('/')
+            ?.takeIf { it.isNotBlank() }?.plus("/")
+        val item = MediaItem(
+            id = file.absolutePath.hashCode().toLong(),
+            uri = runCatching {
+                FileProvider.getUriForFile(
+                    getApplication(), "${getApplication<Application>().packageName}.fileprovider", file
+                )
+            }.getOrNull() ?: return,
+            kind = kind,
+            name = file.name,
+            mimeType = entry.mimeType,
+            sizeBytes = file.length(),
+            dateAdded = System.currentTimeMillis() / 1000,
+            dateModified = file.lastModified() / 1000,
+            durationMs = null,
+            width = null,
+            height = null,
+            relativePath = relative,
+            volumeName = "external",
+            bucket = parent?.name,
+            bucketId = parent?.absolutePath?.hashCode()?.toLong(),
+            title = null,
+            artist = null,
+            album = null,
+            absolutePath = file.absolutePath
+        )
+        val tab = when (kind) {
+            MediaKind.IMAGE -> GalleryTab.PHOTOS
+            MediaKind.VIDEO -> GalleryTab.VIDEOS
+            MediaKind.AUDIO -> GalleryTab.AUDIO
+            MediaKind.DOCUMENT -> GalleryTab.DOCUMENTS
+            MediaKind.APK -> GalleryTab.APK
+        }
+        itemsMap[tab] = (itemsMap[tab].orEmpty() + item).sortedByDescending { it.dateAdded }
+    }
+
+    /** Inserts a newly copied file without re-querying the library. */
+    fun addCopiedItem(source: MediaItem, destination: String) {
+        val file = java.io.File(destination)
+        if (!file.exists()) return
+        val parent = file.parentFile
+        val root = com.alex.photoeditor.core.FolderMaker.sharedStorageRoot().absolutePath
+        val relative = parent?.absolutePath?.removePrefix(root)?.trimStart('/')
+            ?.takeIf { it.isNotBlank() }?.plus("/")
+        val item = source.copy(
+            id = file.absolutePath.hashCode().toLong(),
+            uri = runCatching {
+                FileProvider.getUriForFile(
+                    getApplication(), "${getApplication<Application>().packageName}.fileprovider", file
+                )
+            }.getOrNull() ?: return,
+            name = file.name,
+            sizeBytes = file.length(),
+            dateAdded = System.currentTimeMillis() / 1000,
+            dateModified = file.lastModified() / 1000,
+            relativePath = relative,
+            bucket = parent?.name,
+            bucketId = parent?.absolutePath?.hashCode()?.toLong(),
+            absolutePath = file.absolutePath
+        )
+        val tab = when (source.kind) {
+            MediaKind.IMAGE -> GalleryTab.PHOTOS
+            MediaKind.VIDEO -> GalleryTab.VIDEOS
+            MediaKind.AUDIO -> GalleryTab.AUDIO
+            MediaKind.DOCUMENT -> GalleryTab.DOCUMENTS
+            MediaKind.APK -> GalleryTab.APK
+        }
+        itemsMap[tab] = (itemsMap[tab].orEmpty() + item).sortedByDescending { it.dateAdded }
+    }
+
+    /** Fast local-only trash index refresh (no system-trash query). */
+    fun refreshTrashLocal() {
+        trashEntries = TrashStore.list(getApplication())
+    }
+
+    /** Shows a new name immediately, before the full index catches up. */
+    fun renameItemLocally(tab: GalleryTab, id: Long, newName: String) {
+        itemsMap[tab] = itemsMap[tab].orEmpty().map {
+            if (it.id == id) it.copy(name = newName) else it
+        }
+    }
+
+    /**
+     * Drops one system-trash row immediately, then reconciles in the
+     * background — the restored file shouldn't wait for a full scan.
+     */
+    fun removeSystemTrashLocally(entry: SystemTrash.Entry) {
+        systemTrashItems = systemTrashItems.filterNot { it.id == entry.id }
+    }
 
     init {
+        // Trashed files and leftover APK/icon copies are the two things that
+        // can grow app data without limit; reclaim both on every launch.
+        viewModelScope.launch(Dispatchers.IO) {
+            TrashStore.cleanup(getApplication())
+            StorageCleanup.sweepCache(getApplication())
+        }
         refresh()
     }
 
@@ -149,9 +281,17 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshTrash() {
         viewModelScope.launch(Dispatchers.IO) {
+            TrashStore.cleanup(getApplication())
             trashEntries = TrashStore.list(getApplication())
             systemTrashItems = SystemTrash.query(getApplication())
         }
+    }
+
+    /** Immediate retention/cap cleanup with a local-only index refresh. */
+    fun cleanupTrashNow(): Int {
+        val removed = TrashStore.cleanup(getApplication())
+        trashEntries = TrashStore.list(getApplication())
+        return removed
     }
 
     /** Permanently deletes a system-trash entry (file delete, URI fallback). */
@@ -163,8 +303,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
                     getApplication<android.app.Application>().contentResolver.delete(entry.uri, null, null)
                 }
             }
-            refreshTrash()
-            refresh()
+            removeSystemTrashLocally(entry)
         }
     }
 
@@ -199,8 +338,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val rows = result.getOrNull() ?: -1
                 if (rows > 0) {
-                    refreshTrash()
-                    refresh()
+                    removeSystemTrashLocally(entry)
                     withContext(Dispatchers.Main) {
                         android.widget.Toast.makeText(
                             app,
@@ -215,8 +353,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
             val destination = SystemTrash.restoreFromFilesystem(app, entry)
             if (destination != null) {
-                refreshTrash()
-                refresh()
+                removeSystemTrashLocally(entry)
                 withContext(Dispatchers.Main) {
                     android.widget.Toast.makeText(
                         app,
@@ -246,19 +383,18 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         val entry = trashEntries.firstOrNull { it.id == id } ?: return
         viewModelScope.launch(Dispatchers.IO) {
             val restored = TrashStore.restore(getApplication(), entry)
-            trashEntries = TrashStore.list(getApplication())
+            refreshTrashLocal()
             if (restored != null) {
-                // Scan the restored file; when the media provider has indexed it,
-                // re-query the gallery so the photo reappears without manual refresh.
+                // Show the file immediately; the real library index catches
+                // up in the background instead of blocking this tap.
+                addRestoredItem(entry, restored)
                 android.media.MediaScannerConnection.scanFile(
                     getApplication(),
                     arrayOf(restored),
                     null
-                ) { _, _ ->
-                    refresh()
-                }
+                ) { _, _ -> }
             } else {
-                refresh()
+                // Nothing changed in the library — the visible lists stay put.
             }
         }
     }
@@ -268,8 +404,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         val entry = trashEntries.firstOrNull { it.id == id } ?: return
         viewModelScope.launch(Dispatchers.IO) {
             TrashStore.deleteForever(getApplication(), entry)
-            trashEntries = TrashStore.list(getApplication())
-            refresh()
+            refreshTrashLocal()
         }
     }
 
@@ -285,9 +420,8 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
-            trashEntries = TrashStore.list(getApplication())
-            systemTrashItems = SystemTrash.query(getApplication())
-            refresh()
+            refreshTrashLocal()
+            systemTrashItems = emptyList()
         }
     }
 
@@ -305,10 +439,6 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         // Switching tabs moves to a different kind of view; drop the folder drill-in.
         closeFolder()
         tab = next
-    }
-
-    init {
-        refresh()
     }
 
     /** Re-queries everything. Call after permission is granted or on pull-to-refresh. */

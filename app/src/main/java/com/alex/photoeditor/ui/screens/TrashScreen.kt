@@ -112,11 +112,10 @@ fun TrashScreen(vm: GalleryViewModel) {
     val restoreLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
-        // The system restore is asynchronous; when it returns, refresh both
-        // the bin and the gallery so restored files show up without manual refresh.
+        // The system dialog is the only restore path that needs a re-query;
+        // even here we leave the gallery alone — its lists update in place.
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             vm.refreshTrash()
-            vm.refresh()
         } else {
             android.widget.Toast.makeText(
                 context,
@@ -288,7 +287,13 @@ fun TrashScreen(vm: GalleryViewModel) {
                 "${rows.size} ${if (rows.size == 1) "file" else "files"} · ${formatSize(vm.trashSizeBytes)}",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp)
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 2.dp)
+            )
+            Text(
+                "Old bin files are removed automatically after 7 days or when the bin passes 512 MB.",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 2.dp)
             )
 
             LazyColumn(
@@ -360,6 +365,10 @@ fun TrashScreen(vm: GalleryViewModel) {
                     Text("Root entries visible: ${runCatching { root.listFiles()?.size }.getOrNull() ?: -1}")
                     Text("MediaStore trash rows: $fromProvider · filesystem rows: ${vm.systemTrashItems.size - fromProvider}")
                     Text("App bin rows: ${vm.trashEntries.size}")
+                    Text(
+                        "Bin on disk: ${formatSize(com.alex.photoeditor.core.TrashStore.trashDir(context).listFiles()?.filter { it.isFile && it.name != "trash.json" }?.sumOf { it.length() } ?: 0L)}" +
+                            " · in index: ${formatSize(vm.trashEntries.sumOf { it.sizeBytes })}"
+                    )
                     Text("Samples (up to 8):", style = MaterialTheme.typography.labelSmall)
                     vm.systemTrashItems.take(8).forEach { entry ->
                         Text(
@@ -371,6 +380,16 @@ fun TrashScreen(vm: GalleryViewModel) {
             },
             confirmButton = {
                 TextButton(onClick = { showDiagnostics = false }) { Text("Close") }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    val removed = vm.cleanupTrashNow()
+                    android.widget.Toast.makeText(
+                        context,
+                        if (removed > 0) "Removed $removed old file(s)" else "Nothing to clean",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }) { Text("Clean now") }
             }
         )
     }

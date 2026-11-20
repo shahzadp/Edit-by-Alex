@@ -29,6 +29,11 @@ object TrashStore {
     private const val DIR_NAME = "trash"
     private const val INDEX_NAME = "trash.json"
 
+    /** Bin files older than this are removed automatically. */
+    private const val RETENTION_DAYS = 7L
+    /** Hard cap on the bin; oldest files go first when exceeded. */
+    private const val MAX_TRASH_BYTES = 512L * 1024 * 1024
+
     /** One binned file. */
     @Serializable
     data class TrashEntry(
@@ -86,7 +91,60 @@ object TrashStore {
             moved++
         }
         writeIndex(context, entries)
+        cleanup(context)
         moved
+    }
+
+    /**
+     * Applies retention and the size cap. Returns the number of files erased.
+     * Called on launch, on refresh and after imports, so the bin cannot grow
+     * without bound on a device with lots of deletions.
+     */
+    fun cleanup(context: Context): Int = synchronized(this) {
+        val entries = readIndex(context)
+        val dir = trashDir(context)
+        val now = System.currentTimeMillis()
+        // Disk is authoritative: an index can under-report sizes (or list
+        // files that no longer exist), which used to keep the bin over cap.
+        val allFiles = dir.listFiles().orEmpty().filter { it.isFile && it.name != INDEX_NAME }
+        var diskBytes = allFiles.sumOf { it.length() }
+        val removed = mutableListOf<String>()
+
+        fun erase(file: File) {
+            val length = runCatching { file.length() }.getOrDefault(0)
+            if (runCatching { file.delete() }.getOrDefault(false)) {
+                removed.add(file.name)
+                diskBytes -= length
+            }
+        }
+
+        // 1. Expired by age (index timestamp or real file age).
+        entries.filter {
+            now - it.deletedAt > RETENTION_DAYS * 24 * 60 * 60 * 1000L ||
+                File(it.storedPath).let { f -> !f.exists() || now - f.lastModified() > RETENTION_DAYS * 24 * 60 * 60 * 1000L }
+        }.forEach { erase(File(it.storedPath)) }
+
+        // 2. Size cap, oldest first, until the actual disk usage fits.
+        val remaining = entries.filterNot { File(it.storedPath).name in removed }
+            .sortedByDescending { it.deletedAt }
+            .toMutableList()
+        while (diskBytes > MAX_TRASH_BYTES && remaining.isNotEmpty()) {
+            val oldest = remaining.removeAt(remaining.lastIndex)
+            erase(File(oldest.storedPath))
+        }
+
+        // 3. Orphans (lost/corrupt index). A minute's grace avoids racing an
+        // in-flight import that has moved a file but not yet written the index.
+        val indexed = remaining.map { File(it.storedPath).name }.toSet()
+        allFiles.forEach { file ->
+            if (file.name !in indexed && now - file.lastModified() > 60_000) erase(file)
+        }
+
+        val kept = remaining.filter { File(it.storedPath).exists() }
+        if (removed.isNotEmpty() || kept.size != entries.size) {
+            writeIndex(context, kept)
+        }
+        removed.size
     }
 
     /** Everything in the bin, newest first. */

@@ -388,7 +388,7 @@ fun GalleryScreen(
                     "Moved $moved of ${items.size} items to $folder"
                 }
                 exitSelection()
-                vm.refresh()
+                vm.removeItemsLocally(vm.tab, items.map { it.id }.toSet())
             }
         } else {
             message = "Nothing was moved"
@@ -411,7 +411,7 @@ fun GalleryScreen(
                     "Moved $moved of ${items.size} items to $folder"
                 }
                 exitSelection()
-                vm.refresh()
+                vm.removeItemsLocally(vm.tab, items.map { it.id }.toSet())
             }
             return
         }
@@ -449,7 +449,10 @@ fun GalleryScreen(
                     legacy.listFiles()?.isEmpty().let { if (legacy.exists() && it == true) legacy.delete() }
                 }
             }
-            vm.refresh()
+            // Remove the files from the visible list immediately; the full
+            // library query runs quietly afterwards.
+            vm.removeItemsLocally(vm.tab, items.map { it.id }.toSet())
+            vm.refreshTrashLocal()
             exitSelection()
             exitFolderSelection()
             // Stay on the screen the user is on: the folder they were viewing,
@@ -470,19 +473,20 @@ fun GalleryScreen(
             return
         }
         scope.launch {
-            var copied = 0
+            val copiedPaths = ArrayList<Pair<MediaItem, String>>()
             withContext(Dispatchers.IO) {
                 items.forEach { item ->
-                    if (copyIntoFolder(context, item, folder)) copied++
+                    copyIntoFolder(context, item, folder)?.let { copiedPaths.add(item to it) }
                 }
             }
+            copiedPaths.forEach { (item, path) -> vm.addCopiedItem(item, path) }
+            val copied = copiedPaths.size
             message = if (copied == items.size) {
                 "Copied $copied ${if (copied == 1) "item" else "items"} to $folder"
             } else {
                 "Copied $copied of ${items.size} items to $folder"
             }
             exitSelection()
-            vm.refresh()
         }
     }
 
@@ -843,7 +847,7 @@ fun GalleryScreen(
                         renameMediaItem(context, target, newName)
                     }
                     if (ok) {
-                        vm.refresh()
+                        vm.renameItemLocally(vm.tab, target.id, newName)
                         message = "Renamed to $newName"
                     } else {
                         message = "Could not rename — the name may be in use"
@@ -871,7 +875,6 @@ fun GalleryScreen(
                             vm.removeUserFolder(target.name)
                             vm.addUserFolder(newName)
                         }
-                        vm.refresh()
                         message = "Folder renamed to $newName"
                     } else {
                         message = "Could not rename the folder — the name may be in use"
@@ -2724,12 +2727,12 @@ private fun renameFolderOnDisk(context: Context, group: FolderGroup, newName: St
     return true
 }
 
-/** Copies one media item into `<storage root>/<folder>/`; false if anything failed. */
+/** Copies one media item into `<storage root>/<folder>/`; returns its new path. */
 private suspend fun copyIntoFolder(
     context: Context,
     item: MediaItem,
     folder: String
-): Boolean = withContext(Dispatchers.IO) {
+): String? = withContext(Dispatchers.IO) {
     // Copies INSIDE the same folder would clash names, so they get a suffix.
     val sameFolder = item.bucket?.equals(folder, ignoreCase = true) == true
     val base = item.name.substringBeforeLast('.', item.name)
@@ -2738,7 +2741,7 @@ private suspend fun copyIntoFolder(
 
     val root = FolderMaker.sharedStorageRoot()
     val destDir = java.io.File(root, folder)
-    if (!destDir.exists() && !destDir.mkdirs()) return@withContext false
+    if (!destDir.exists() && !destDir.mkdirs()) return@withContext null
 
     var dest = java.io.File(destDir, displayName)
     var suffix = 1
@@ -2747,11 +2750,12 @@ private suspend fun copyIntoFolder(
         suffix++
     }
 
-    runCatching {
+    val ok = runCatching {
         context.contentResolver.openInputStream(item.uri)?.use { input ->
             dest.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
         } != null && dest.length() > 0
     }.getOrDefault(false)
+    if (ok) dest.absolutePath else null
 }
 
 /** Decodes an animated GIF once per item; null for everything else. */

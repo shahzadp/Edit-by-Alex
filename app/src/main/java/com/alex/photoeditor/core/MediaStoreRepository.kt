@@ -15,6 +15,8 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withContext
 import androidx.exifinterface.media.ExifInterface
 import java.util.Locale
@@ -97,8 +99,11 @@ object MediaStoreRepository {
                     // rows out of it. All-files access lets us walk shared
                     // storage directly — that is the authoritative source,
                     // with MediaStore rows merged for virtual/cloud files.
-                    val fromDisk = queryFilesFromDisk(context, kind)
-                    val fromProvider = queryFiles(context, kind)
+                    val (fromDisk, fromProvider) = coroutineScope {
+                        val disk = async(Dispatchers.IO) { queryFilesFromDisk(context, kind) }
+                        val provider = async(Dispatchers.IO) { queryFiles(context, kind) }
+                        disk.await() to provider.await()
+                    }
                     val seen = HashSet<String>()
                     (fromDisk + fromProvider).filter { item ->
                         val key = item.absolutePath
@@ -131,7 +136,7 @@ object MediaStoreRepository {
         // MaterialFiles lists one directory at a time — never the whole tree.
         // Mirror that: bounded depth + a wall-clock budget, so a huge storage
         // can never leave the gallery stuck on "loading".
-        val deadline = System.currentTimeMillis() + 2500L
+        val deadline = System.currentTimeMillis() + 1200L
         roots.forEach { root ->
             fun walk(dir: java.io.File, depth: Int) {
                 if (depth > 3 || result.size >= MAX_FILES_ITEMS ||
