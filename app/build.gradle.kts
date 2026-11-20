@@ -18,6 +18,13 @@ android {
         targetSdk = 36
         versionCode = 3
         versionName = "1.2"
+
+        // Phones only use these two ABIs. MediaPipe otherwise ships four copies
+        // of its native library (~28 MB of dead weight in the APK), and x86
+        // also drags in an emulator-only option we don't support.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     // ---------------------------------------------------------------- signing

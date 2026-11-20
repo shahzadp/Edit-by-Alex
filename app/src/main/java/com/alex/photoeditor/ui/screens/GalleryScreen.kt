@@ -253,6 +253,8 @@ fun GalleryScreen(
     var searchQuery by remember { mutableStateOf<String?>(null) }
     var renameTarget by remember { mutableStateOf<MediaItem?>(null) }
     var renameFolderTarget by remember { mutableStateOf<FolderGroup?>(null) }
+    var documentToView by remember { mutableStateOf<MediaItem?>(null) }
+    BackHandler(enabled = documentToView != null) { documentToView = null }
     BackHandler(enabled = searchQuery != null) {
         searchQuery = null
         selectionMode = false
@@ -671,7 +673,7 @@ fun GalleryScreen(
                                     when (item.kind) {
                                         MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.AUDIO ->
                                             openViewer(results, index)
-                                        else -> openFile(context, item)
+                                        else -> openFile(context, item) { documentToView = it }
                                     }
                                 }
                             },
@@ -707,7 +709,7 @@ fun GalleryScreen(
                                     items = folderItems,
                                     selectionMode = selectionMode,
                                     selectedIds = selectedIds,
-                                    onItemClick = { openFile(context, it) },
+                                    onItemClick = { openFile(context, it) { documentToView = it } },
                                     onToggleSelect = ::toggleSelect
                                 )
                                 else -> MediaGrid(
@@ -779,7 +781,7 @@ fun GalleryScreen(
                             items = items,
                             selectionMode = selectionMode,
                             selectedIds = selectedIds,
-                            onItemClick = { openFile(context, it) },
+                            onItemClick = { openFile(context, it) { documentToView = it } },
                             onToggleSelect = ::toggleSelect
                         )
 
@@ -798,6 +800,13 @@ fun GalleryScreen(
                     }
                     }
                 }
+            }
+
+            documentToView?.let { doc ->
+                DocumentViewer(
+                    item = doc,
+                    onClose = { documentToView = null }
+                )
             }
 
             viewerItems?.let { items ->
@@ -1691,8 +1700,12 @@ private fun SearchResultRow(
 
 // ---------------------------------------------------------- documents / APKs
 
-/** Opens a file: APKs go straight to the package installer, others to a chooser. */
-private fun openFile(context: Context, item: MediaItem) {
+/** Opens a file: APKs install directly, viewable documents open in-app, rest use a chooser. */
+private fun openFile(
+    context: Context,
+    item: MediaItem,
+    onViewDocument: (MediaItem) -> Unit
+) {
     if (item.kind == MediaKind.APK ||
         item.name.endsWith(".apk", ignoreCase = true) ||
         item.mimeType == "application/vnd.android.package-archive"
@@ -1700,6 +1713,15 @@ private fun openFile(context: Context, item: MediaItem) {
         installApk(context, item)
         return
     }
+    if (isViewableDocument(item)) {
+        onViewDocument(item)
+        return
+    }
+    launchOpenWith(context, item)
+}
+
+/** Hands a file to whichever external app handles its MIME type. */
+private fun launchOpenWith(context: Context, item: MediaItem) {
     val mime = item.mimeType.takeIf { it.isNotBlank() && it != "application/octet-stream" }
         ?: com.alex.photoeditor.core.SystemTrash.mimeTypeForName(item.name)
     val intent = Intent(Intent.ACTION_VIEW).apply {
