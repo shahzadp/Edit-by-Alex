@@ -31,17 +31,36 @@ object UserFolders {
     /** Adds a folder, or replaces it case-insensitively. False if the name is not usable. */
     fun add(context: Context, rawName: String): Boolean {
         val name = rawName.trim()
-        if (name.isEmpty() || name.length > MAX_NAME_LENGTH) return false
-        // Control characters would break persistence and path handling.
-        if (name.any { it.isISOControl() }) return false
-        // These path segments would escape the intended directory.
-        if (name.contains('/') || name.contains('\\') || name == "." || name == "..") return false
+        if (!usable(name)) return false
 
         val current = prefs(context).getStringSet(KEY, emptySet()).orEmpty()
         // Upsert with case-insensitive comparison so "camera" and "Camera" don't fork.
         val next = current.filterNot { it.equals(name, ignoreCase = true) }.toMutableSet()
         next.add(name)
         prefs(context).edit().putStringSet(KEY, next).apply()
+        return true
+    }
+
+    /** Renames a tracked folder, keeping the rest of the list intact. */
+    fun rename(context: Context, oldName: String, newRawName: String): Boolean {
+        val newName = newRawName.trim()
+        if (!usable(newName)) return false
+        val current = prefs(context).getStringSet(KEY, emptySet()).orEmpty()
+        if (current.none { it.equals(oldName, ignoreCase = true) }) return false
+        val next = current.filterNot { it.equals(oldName, ignoreCase = true) }
+            .filterNot { it.equals(newName, ignoreCase = true) }
+            .toMutableSet()
+        next.add(newName)
+        prefs(context).edit().putStringSet(KEY, next).apply()
+        return true
+    }
+
+    private fun usable(name: String): Boolean {
+        if (name.isEmpty() || name.length > MAX_NAME_LENGTH) return false
+        // Control characters would break persistence and path handling.
+        if (name.any { it.isISOControl() }) return false
+        // These path segments would escape the intended directory.
+        if (name.contains('/') || name.contains('\\') || name == "." || name == "..") return false
         return true
     }
 

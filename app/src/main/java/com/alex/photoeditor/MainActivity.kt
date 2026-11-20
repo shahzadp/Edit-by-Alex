@@ -11,12 +11,15 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.alex.photoeditor.ui.EditorViewModel
 import com.alex.photoeditor.ui.screens.EditorScreen
+import com.alex.photoeditor.ui.screens.OnboardingPrefs
+import com.alex.photoeditor.ui.screens.OnboardingScreen
 import com.alex.photoeditor.ui.components.AllFilesGate
 import com.alex.photoeditor.ui.theme.PhotoEditorTheme
 
@@ -110,14 +113,20 @@ class MainActivity : ComponentActivity() {
                     vm.consumeShareRequest()
                 }
 
-                // The whole app is gated behind all files access — the editor is a
-                // file manager for media; without direct storage there is no product.
-                AllFilesGate {
-                    EditorScreen(
-                        vm = vm,
-                        onPickImage = { pickImage.launch(arrayOf("image/*")) },
-                        onPickLayer = { pickLayer.launch(arrayOf("image/*")) }
-                    )
+                // One-time onboarding asks for the two special permissions,
+                // then the normal gate keeps the app honest if storage access
+                // is revoked later. Onboarding itself never appears again.
+                var onboardingDone by remember { mutableStateOf(OnboardingPrefs.isDone(context)) }
+                if (!onboardingDone) {
+                    OnboardingScreen(onFinished = { onboardingDone = true })
+                } else {
+                    AllFilesGate {
+                        EditorScreen(
+                            vm = vm,
+                            onPickImage = { pickImage.launch(arrayOf("image/*")) },
+                            onPickLayer = { pickLayer.launch(arrayOf("image/*")) }
+                        )
+                    }
                 }
             }
         }

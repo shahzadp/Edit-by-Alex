@@ -32,7 +32,7 @@ import java.util.Locale
  */
 object SystemTrash {
 
-    private const val MAX_SCAN_ITEMS = 1_000
+    private const val MAX_SCAN_ITEMS = 4_000
     private const val MAX_DEPTH = 4
 
     /** One system-trashed file, from either source. */
@@ -63,12 +63,17 @@ object SystemTrash {
             emptyList()
         }
         val fs = scanFilesystemTrash(context)
-        val seen = HashSet<String>()
+        val seenPaths = HashSet<String>()
+        val seenIds = HashSet<String>()
         val merged = ArrayList<Entry>(media.size + files.size + fs.size)
-        // Dedup by file path — MediaStore rows and raw filesystem finds overlap.
+        // Dedup by path OR id: MediaStore rows and raw filesystem finds
+        // overlap, and some providers return no DATA path at all.
         (media + files + fs).forEach { entry ->
-            val key = entry.path ?: entry.id
-            if (seen.add(key)) merged.add(entry)
+            val pathKey = entry.path
+            if ((pathKey != null && !seenPaths.add(pathKey)) || !seenIds.add(entry.id)) {
+                return@forEach
+            }
+            merged.add(entry)
         }
         merged.sortedByDescending { it.dateAddedSeconds }
     }
@@ -158,35 +163,128 @@ object SystemTrash {
         return result
     }
 
+    private val TRASH_DOCUMENT_SELECTION = listOf(
+        "pdf", "txt", "doc", "docx", "odt", "rtf", "md", "xls", "xlsx", "ppt", "pptx",
+        "epub", "zip", "rar", "7z", "csv", "apk"
+    ).joinToString(" OR ") { "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE '%.${it}'" } +
+        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'text/%'" +
+        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/pdf'" +
+        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/msword'" +
+        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/vnd.%'" +
+        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/epub%'" +
+        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/zip'" +
+        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/x-7z%'" +
+        " OR ${MediaStore.MediaColumns.MIME_TYPE}='application/vnd.android.package-archive'"
+
     /** Everything the Files collection marks as trashed — images, docs, APKs, all of it. */
     private fun queryAllFilesTrash(context: Context): List<Entry> {
-        val allUri = MediaStore.Files.getContentUri("external")
         val result = ArrayList<Entry>()
-        trashQuery(context, allUri)?.use { cursor ->
-            val idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
-            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
-            val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
-            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
-            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
-            val dataCol = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+        // MediaStore has one Files collection per volume. The primary one is
+        // aliased "external"; SD cards / USB volumes have their own names.
+        val volumes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                val manager = context.getSystemService(android.os.storage.StorageManager::class.java)
+                manager.storageVolumes.mapNotNull { it.mediaStoreVolumeName }.distinct()
+            }.getOrElse { listOf("external") }
+        } else {
+            listOf("external")
+        }.ifEmpty { listOf("external") }
 
-            while (cursor.moveToNext() && result.size < MAX_SCAN_ITEMS) {
-                val id = cursor.getLong(idCol)
-                val itemUri = Uri.withAppendedPath(allUri, id.toString())
-                val name = cursor.getString(nameCol) ?: "Unknown"
-                val mime = cursor.getString(mimeCol) ?: "application/octet-stream"
-                result.add(
-                    Entry(
-                        id = itemUri.toString(),
-                        uri = itemUri,
-                        name = name,
-                        mimeType = mime,
-                        sizeBytes = cursor.getLong(sizeCol),
-                        dateAddedSeconds = cursor.getLong(dateCol),
-                        kind = mediaKindFor(name),
-                        path = if (dataCol >= 0) cursor.getString(dataCol) else null
-                    )
-                )
+        volumes.forEach { volume ->
+            val uri = MediaStore.Files.getContentUri(volume)
+            // MATCH_ONLY finds rows on standard providers. The selection form
+            // is a second chance on builds that treat document rows differently;
+            // query() dedups by path so any overlap collapses to one row.
+            val queries = listOfNotNull(
+                runCatching { trashQuery(context, uri) }.getOrNull(),
+                // Document-only query: providers that truncate a broad
+                // MATCH_ONLY result still return trashed PDFs/TXTs here.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    runCatching {
+                        context.contentResolver.query(
+                            uri,
+                            PROJECTION,
+                            android.os.Bundle().apply {
+                                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+                                putString(
+                                    android.content.ContentResolver.QUERY_ARG_SQL_SELECTION,
+                                    TRASH_DOCUMENT_SELECTION
+                                )
+                                putString(
+                                    android.content.ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                                    "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+                                )
+                            },
+                            null
+                        )
+                    }.getOrNull()
+                } else null,
+                // MATCH_ONLY on some providers returns only media-family rows.
+                // MATCH_INCLUDE with an IS_TRASHED selection is the other
+                // documented form and catches document/APK rows there.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    runCatching {
+                        context.contentResolver.query(
+                            uri,
+                            PROJECTION,
+                            android.os.Bundle().apply {
+                                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+                                putString(
+                                    android.content.ContentResolver.QUERY_ARG_SQL_SELECTION,
+                                    "${MediaStore.MediaColumns.IS_TRASHED}=1"
+                                )
+                                putString(
+                                    android.content.ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                                    "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+                                )
+                            },
+                            null
+                        )
+                    }.getOrNull()
+                } else null,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    runCatching {
+                        context.contentResolver.query(
+                            uri,
+                            PROJECTION,
+                            "${MediaStore.MediaColumns.IS_TRASHED}=1",
+                            null,
+                            "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+                        )
+                    }.getOrNull()
+                } else null
+            )
+            queries.forEach { cursor ->
+                runCatching {
+                    cursor.use { c ->
+                        val idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                        val nameCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                        val mimeCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                        val sizeCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                        val dateCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
+                        val dataCol = c.getColumnIndex(MediaStore.MediaColumns.DATA)
+
+                        while (c.moveToNext() && result.size < MAX_SCAN_ITEMS) {
+                            val id = c.getLong(idCol)
+                            val itemUri = Uri.withAppendedPath(uri, id.toString())
+                            val name = c.getString(nameCol) ?: "Unknown"
+                            result.add(
+                                Entry(
+                                    id = itemUri.toString(),
+                                    uri = itemUri,
+                                    name = name,
+                                    mimeType = c.getString(mimeCol)
+                                        ?.takeIf { it.isNotBlank() }
+                                        ?: mimeTypeForName(name),
+                                    sizeBytes = c.getLong(sizeCol),
+                                    dateAddedSeconds = c.getLong(dateCol),
+                                    kind = mediaKindFor(name),
+                                    path = if (dataCol >= 0) c.getString(dataCol) else null
+                                )
+                            )
+                        }
+                    }
+                }
             }
         }
         return result
@@ -211,6 +309,10 @@ object SystemTrash {
     private fun trashQuery(context: Context, uri: Uri): android.database.Cursor? {
         val bundle = android.os.Bundle().apply {
             putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_ONLY)
+            putString(
+                android.content.ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+            )
         }
         val viaArgs = runCatching {
             context.contentResolver.query(uri, PROJECTION, bundle, null)
@@ -259,11 +361,20 @@ object SystemTrash {
 
         val scanRoots = mutableSetOf<File>()
         roots.forEach { root ->
-            // Any direct child whose name contains "trash" or "recycle" — not just a leading dot —
-            // catches OEMs that scatter their trash anywhere on the volume.
-            root.listFiles { f ->
-                f.isDirectory && f.name.contains("trash", ignoreCase = true)
-            }?.let(scanRoots::addAll)
+            // Any directory whose name smells like a bin at the volume root,
+            // or one level inside ordinary folders (where OEM file managers
+            // sometimes hide theirs). Covers ".Trash-1000", "Recycle Bin",
+            // ".recycle", "FilesByGoogleTrash", ".trash", etc.
+            val candidates = root.listFiles { f ->
+                f.isDirectory && isTrashDirName(f.name)
+            }.orEmpty().toMutableList()
+            root.listFiles { f -> f.isDirectory && !f.name.startsWith(".") }
+                .orEmpty()
+                .forEach { top ->
+                    top.listFiles { f -> f.isDirectory && isTrashDirName(f.name) }
+                        ?.let(candidates::addAll)
+                }
+            scanRoots.addAll(candidates)
         }
 
         val result = ArrayList<Entry>()
@@ -277,7 +388,7 @@ object SystemTrash {
                             id = file.absolutePath,
                             uri = null,
                             name = file.name,
-                            mimeType = mimeTypeFor(file.name),
+                            mimeType = mimeTypeForName(file.name),
                             sizeBytes = file.length(),
                             dateAddedSeconds = file.lastModified() / 1000,
                             kind = mediaKindFor(file.name),
@@ -293,8 +404,12 @@ object SystemTrash {
         return result
     }
 
-    /** Best-effort MIME type from a filename extension. */
-    private fun mimeTypeFor(name: String): String =
+    private fun isTrashDirName(name: String): Boolean =
+        listOf("trash", "recycle", "recycler", "rubbish", "deleted", "bin")
+            .any { name.contains(it, ignoreCase = true) }
+
+    /** Best-effort MIME type from a filename extension. Shared with the gallery's file tabs. */
+    fun mimeTypeForName(name: String): String =
         when (name.substringAfterLast('.', "").lowercase(Locale.US)) {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"
@@ -322,7 +437,14 @@ object SystemTrash {
             "ppt" -> "application/vnd.ms-powerpoint"
             "pptx" -> "application/vnd.openxmlformats-officedocument.presentationml.presentation"
             "zip" -> "application/zip"
-            "txt" -> "text/plain"
+            "rar" -> "application/vnd.rar"
+            "7z" -> "application/x-7z-compressed"
+            "tar" -> "application/x-tar"
+            "gz", "tgz" -> "application/gzip"
+            "md" -> "text/markdown"
+            "csv" -> "text/csv"
+            "epub" -> "application/epub+zip"
+            "txt", "text", "log" -> "text/plain"
             "json" -> "application/json"
             else -> "application/octet-stream"
         }
@@ -332,6 +454,10 @@ object SystemTrash {
             "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "svg", "bmp", "tif", "tiff", "avif" -> MediaKind.IMAGE
             "mp4", "mkv", "mov", "webm", "avi", "flv", "3gp", "m4v", "ts", "wmv", "mpg", "mpeg" -> MediaKind.VIDEO
             "mp3", "flac", "wav", "aac", "m4a", "ogg", "wma", "opus", "amr" -> MediaKind.AUDIO
+            "apk" -> MediaKind.APK
+            "pdf", "txt", "text", "doc", "docx", "odt", "rtf", "md", "tex", "xls", "xlsx",
+            "ods", "csv", "ppt", "pptx", "odp", "epub", "mobi", "azw3", "json", "xml",
+            "yaml", "yml", "log", "zip", "rar", "7z", "tar", "gz", "tgz" -> MediaKind.DOCUMENT
             else -> null
         }
 

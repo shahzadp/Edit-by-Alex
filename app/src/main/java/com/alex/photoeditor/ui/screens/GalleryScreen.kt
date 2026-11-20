@@ -1,13 +1,19 @@
 package com.alex.photoeditor.ui.screens
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
+import android.widget.ImageView
+import androidx.core.content.FileProvider
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -34,6 +40,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -42,6 +49,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.CircleShape
@@ -54,7 +62,10 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.GetApp
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -64,6 +75,7 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -74,6 +86,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
@@ -93,6 +106,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -104,6 +119,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.alex.photoeditor.core.MediaItem
 import com.alex.photoeditor.core.MediaKind
@@ -121,15 +137,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * Everything the device already has: photos, videos and audio.
+ * Everything the device already has: photos, videos, audio, documents and APKs.
  *
- * Three inner tabs, swipeable in either direction — the pager is the source
- * of truth and the tab pills just follow it. The gallery is entirely
+ * Five inner tabs, swipeable in either direction — the pager is the source
+ * of truth and the tab pills just follow it. Documents and APKs are listed
+ * flat from MediaStore.Files (every storage volume); the three media tabs are
  * folder-first: every folder (strictly grouped by
  * [MediaStore.MediaColumns.BUCKET_ID], so same-named folders stay separate),
  * sortable Recent / Alphabetical / Size / Custom. Media outside any folder
@@ -141,7 +159,8 @@ import java.util.Locale
  * Copy, and Delete (to Trash).
  *
  * Tapping a photo hands it to the editor; tapping anything else plays it in
- * place, because a gallery is a viewing surface first.
+ * place, because a gallery is a viewing surface first. Documents and APKs
+ * open in whichever app handles them (the package installer for APKs).
  */
 
 /** How folders are ordered. */
@@ -229,6 +248,20 @@ fun GalleryScreen(
     // selection.
     var folderSelectionMode by remember { mutableStateOf(false) }
     var selectedFolderKeys by remember { mutableStateOf(emptySet<String>()) }
+
+    /** Non-null query means the unified search view replaces the tabs. */
+    var searchQuery by remember { mutableStateOf<String?>(null) }
+    var renameTarget by remember { mutableStateOf<MediaItem?>(null) }
+    var renameFolderTarget by remember { mutableStateOf<FolderGroup?>(null) }
+    BackHandler(enabled = searchQuery != null) { searchQuery = null }
+    LaunchedEffect(searchQuery) {
+        if (searchQuery != null) {
+            selectionMode = false
+            selectedIds = emptySet()
+            folderSelectionMode = false
+            selectedFolderKeys = emptySet()
+        }
+    }
 
     fun exitSelection() {
         selectionMode = false
@@ -460,15 +493,18 @@ fun GalleryScreen(
     BackHandler(enabled = selectionMode) { exitSelection() }
     BackHandler(enabled = folderSelectionMode) { exitFolderSelection() }
 
+    val photosItems = vm.itemsOf(GalleryTab.PHOTOS)
+    val videosItems = vm.itemsOf(GalleryTab.VIDEOS)
+    val audioItems = vm.itemsOf(GalleryTab.AUDIO)
+    val docsItems = vm.itemsOf(GalleryTab.DOCUMENTS)
+    val apkItems = vm.itemsOf(GalleryTab.APK)
+
+    // All five lists must be keys: documents/APKs load asynchronously, and a
+    // memo keyed only on media would keep showing the empty document folders.
     val destinations = remember(
-        vm.itemsOf(GalleryTab.PHOTOS),
-        vm.itemsOf(GalleryTab.VIDEOS),
-        vm.itemsOf(GalleryTab.AUDIO),
-        vm.userFolders
+        photosItems, videosItems, audioItems, docsItems, apkItems, vm.userFolders
     ) {
-        val existing = (vm.itemsOf(GalleryTab.PHOTOS) +
-            vm.itemsOf(GalleryTab.VIDEOS) +
-            vm.itemsOf(GalleryTab.AUDIO))
+        val existing = (photosItems + videosItems + audioItems + docsItems + apkItems)
             .mapNotNull { it.bucket?.takeIf { name -> name.isNotBlank() } }
         (existing + vm.userFolders)
             .distinctBy { it.lowercase(Locale.getDefault()) }
@@ -478,16 +514,20 @@ fun GalleryScreen(
     // Computed once per (data, sort) change so the pager, the folders panel
     // and the top bar's folder-selection mode all read the same grouping
     // without re-sorting on every frame.
-    val photosItems = vm.itemsOf(GalleryTab.PHOTOS)
-    val videosItems = vm.itemsOf(GalleryTab.VIDEOS)
-    val audioItems = vm.itemsOf(GalleryTab.AUDIO)
-    val foldersByTab = remember(photosItems, videosItems, audioItems, vm.userFolders, folderSort, customOrder) {
+    val foldersByTab = remember(
+        photosItems, videosItems, audioItems, docsItems, apkItems,
+        vm.userFolders, folderSort, customOrder
+    ) {
         GalleryTab.entries.associateWith { tab ->
             sortFolders(groupByFolder(vm.itemsOf(tab), vm.userFolders), folderSort, customOrder)
         }
     }
     val currentFolders = foldersByTab.getValue(vm.tab)
     val selectedFolderGroups = currentFolders.filter { it.key.toString() in selectedFolderKeys }
+
+    // Search spans every category at once — the five tab lists are merged
+    // here, newest first, then filtered by the query in the results view.
+    val allItemsForSearch = GalleryTab.entries.flatMap { vm.itemsOf(it) }
 
     // Top and side insets are applied by the host screen; the bottom inset
     // is owned by the app's bottom navigation bar.
@@ -513,6 +553,8 @@ fun GalleryScreen(
                 },
                 onInfo = { showFolderInfo = selectedFolderGroups.firstOrNull() },
                 infoEnabled = selectedFolderGroups.size == 1,
+                onRename = { renameFolderTarget = selectedFolderGroups.firstOrNull() },
+                renameEnabled = selectedFolderGroups.size == 1,
                 onDelete = {
                     val groups = selectedFolderGroups
                     val items = groups.flatMap { it.items }
@@ -539,6 +581,8 @@ fun GalleryScreen(
                     val items = selectedItems()
                     confirmTrash = TrashPlan(caption = "files", items = items)
                 },
+                onRename = { renameTarget = selectedItems().firstOrNull() },
+                renameEnabled = selectedIds.size == 1,
                 onExit = ::exitSelection
             )
         } else {
@@ -548,11 +592,20 @@ fun GalleryScreen(
                 sort = folderSort,
                 onSortChange = ::setSort,
                 onCreateFolder = { showNewFolderDialog = true },
-                onOpenTrash = vm::openTrash
+                onOpenTrash = vm::openTrash,
+                onSearch = { searchQuery = "" }
             )
         }
 
-        TabRow(selected = vm.tab, onSelect = vm::selectTab)
+        if (searchQuery == null) {
+            TabRow(selected = vm.tab, onSelect = vm::selectTab)
+        } else {
+            SearchBar(
+                query = searchQuery ?: "",
+                onQueryChange = { searchQuery = it },
+                onClose = { searchQuery = null }
+            )
+        }
 
         if (vm.isLoading) {
             LinearProgressIndicator(
@@ -563,6 +616,33 @@ fun GalleryScreen(
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
+                searchQuery != null -> {
+                    val query = searchQuery.orEmpty().trim()
+                    val results = if (query.isBlank()) {
+                        emptyList()
+                    } else {
+                        allItemsForSearch.filter { item ->
+                            item.name.contains(query, ignoreCase = true) ||
+                                item.relativePath?.contains(query, ignoreCase = true) == true ||
+                                item.mimeType.contains(query, ignoreCase = true)
+                        }.sortedByDescending { it.dateAdded }
+                    }
+                    when {
+                        query.isBlank() -> SearchHint()
+                        results.isEmpty() -> SearchEmpty(query)
+                        else -> SearchResults(
+                            items = results,
+                            onItemClick = { item, index ->
+                                when (item.kind) {
+                                    MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.AUDIO ->
+                                        openViewer(results, index)
+                                    else -> openFile(context, item)
+                                }
+                            }
+                        )
+                    }
+                }
+
                 openFolder != null -> {
                     val folder = openFolder!!
                     val folderItems = visibleItems()
@@ -584,6 +664,13 @@ fun GalleryScreen(
                                         if (selectionMode) toggleSelect(item)
                                         else openViewer(folderItems, index)
                                     },
+                                    onToggleSelect = ::toggleSelect
+                                )
+                                GalleryTab.DOCUMENTS, GalleryTab.APK -> FileList(
+                                    items = folderItems,
+                                    selectionMode = selectionMode,
+                                    selectedIds = selectedIds,
+                                    onItemClick = { openFile(context, it) },
                                     onToggleSelect = ::toggleSelect
                                 )
                                 else -> MediaGrid(
@@ -640,13 +727,24 @@ fun GalleryScreen(
                     val error = vm.errorOf(pageTab)
                     val loading = vm.isLoadingOf(pageTab)
 
+                    val isFlatFileTab = pageTab == GalleryTab.APK
+
                     when {
                         error != null -> ErrorState(
                             message = error,
                             onRetry = vm::refresh
                         )
 
-                        items.isEmpty() && vm.userFolders.isEmpty() && !loading -> EmptyTab(pageTab)
+                        items.isEmpty() && !loading &&
+                            (isFlatFileTab || vm.userFolders.isEmpty()) -> EmptyTab(pageTab)
+
+                        isFlatFileTab -> FileList(
+                            items = items,
+                            selectionMode = selectionMode,
+                            selectedIds = selectedIds,
+                            onItemClick = { openFile(context, it) },
+                            onToggleSelect = ::toggleSelect
+                        )
 
                         else -> FoldersPanel(
                             folders = foldersByTab.getValue(pageTab),
@@ -733,6 +831,58 @@ fun GalleryScreen(
         FolderInfoDialog(folder = folder, onClose = { showFolderInfo = null })
     }
 
+    renameTarget?.let { target ->
+        RenameDialog(
+            title = "Rename file",
+            initial = target.name,
+            onDismiss = { renameTarget = null },
+            onConfirm = { newName ->
+                renameTarget = null
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        renameMediaItem(context, target, newName)
+                    }
+                    if (ok) {
+                        vm.refresh()
+                        message = "Renamed to $newName"
+                    } else {
+                        message = "Could not rename — the name may be in use"
+                    }
+                    exitSelection()
+                }
+            }
+        )
+    }
+
+    renameFolderTarget?.let { target ->
+        RenameDialog(
+            title = "Rename folder",
+            initial = target.name,
+            onDismiss = { renameFolderTarget = null },
+            onConfirm = { newName ->
+                renameFolderTarget = null
+                scope.launch {
+                    val ok = withContext(Dispatchers.IO) {
+                        renameFolderOnDisk(context, target, newName)
+                    }
+                    if (ok) {
+                        if (target.userCreated) {
+                            com.alex.photoeditor.core.UserFolders.rename(context, target.name, newName)
+                            vm.removeUserFolder(target.name)
+                            vm.addUserFolder(newName)
+                        }
+                        vm.refresh()
+                        message = "Folder renamed to $newName"
+                    } else {
+                        message = "Could not rename the folder — the name may be in use"
+                    }
+                    exitFolderSelection()
+                    vm.closeFolder()
+                }
+            }
+        )
+    }
+
     if (pendingAction != null) {
         MoveCopyDialog(
             action = pendingAction!!,
@@ -815,7 +965,8 @@ private fun GalleryTopBar(
     sort: FolderSort,
     onSortChange: (FolderSort) -> Unit,
     onCreateFolder: () -> Unit,
-    onOpenTrash: () -> Unit
+    onOpenTrash: () -> Unit,
+    onSearch: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -824,12 +975,11 @@ private fun GalleryTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        Spacer(Modifier.width(12.dp))
-        Text(
-            "Gallery",
-            style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f)
+        Spacer(Modifier.weight(1f))
+        NamedActionTonalIconButton(
+            name = "Search all files",
+            icon = Icons.Filled.Search,
+            onClick = onSearch
         )
         SortMenu(sort = sort, onSortChange = onSortChange)
         NamedActionTonalIconButton(
@@ -895,6 +1045,8 @@ private fun SelectionBar(
     onMove: () -> Unit,
     onCopy: () -> Unit,
     onDelete: () -> Unit,
+    onRename: () -> Unit,
+    renameEnabled: Boolean,
     onExit: () -> Unit
 ) {
     Row(
@@ -910,11 +1062,12 @@ private fun SelectionBar(
             onClick = onExit
         )
         Text(
-            if (count == 1) "1 selected" else "$count selected",
+            count.toString(),
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.padding(horizontal = 4.dp)
         )
+        Spacer(Modifier.weight(1f))
         CircleCheckToggle(
             checked = allSelected,
             onClick = onSelectAll,
@@ -931,6 +1084,12 @@ private fun SelectionBar(
             icon = Icons.Filled.ContentCopy,
             onClick = onCopy,
             enabled = count > 0
+        )
+        NamedActionIconButton(
+            name = "Rename",
+            icon = Icons.Filled.Edit,
+            onClick = onRename,
+            enabled = renameEnabled
         )
         NamedActionIconButton(
             name = "Delete",
@@ -950,6 +1109,8 @@ private fun FolderSelectionBar(
     onAllNone: () -> Unit,
     onInfo: () -> Unit,
     infoEnabled: Boolean,
+    onRename: () -> Unit,
+    renameEnabled: Boolean,
     onDelete: () -> Unit,
     onExit: () -> Unit
 ) {
@@ -966,11 +1127,12 @@ private fun FolderSelectionBar(
             onClick = onExit
         )
         Text(
-            if (count == 1) "1 folder" else "$count folders",
+            count.toString(),
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier.padding(horizontal = 4.dp)
         )
+        Spacer(Modifier.weight(1f))
         CircleCheckToggle(
             checked = allSelected,
             onClick = onAllNone,
@@ -981,6 +1143,12 @@ private fun FolderSelectionBar(
             icon = Icons.Filled.Info,
             onClick = onInfo,
             enabled = infoEnabled
+        )
+        NamedActionIconButton(
+            name = "Rename folder",
+            icon = Icons.Filled.Edit,
+            onClick = onRename,
+            enabled = renameEnabled
         )
         NamedActionIconButton(
             name = "Delete folder",
@@ -1001,30 +1169,25 @@ private fun TabRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        TabPill(
-            label = "Photos",
-            icon = Icons.Filled.PhotoLibrary,
-            selected = selected == GalleryTab.PHOTOS,
-            onClick = { onSelect(GalleryTab.PHOTOS) },
-            modifier = Modifier.weight(1f)
-        )
-        TabPill(
-            label = "Videos",
-            icon = Icons.Filled.Movie,
-            selected = selected == GalleryTab.VIDEOS,
-            onClick = { onSelect(GalleryTab.VIDEOS) },
-            modifier = Modifier.weight(1f)
-        )
-        TabPill(
-            label = "Audio",
-            icon = Icons.Filled.MusicNote,
-            selected = selected == GalleryTab.AUDIO,
-            onClick = { onSelect(GalleryTab.AUDIO) },
-            modifier = Modifier.weight(1f)
-        )
+        GalleryTab.entries.forEach { tab ->
+            TabPill(
+                label = tab.label,
+                icon = when (tab) {
+                    GalleryTab.PHOTOS -> Icons.Filled.PhotoLibrary
+                    GalleryTab.VIDEOS -> Icons.Filled.Movie
+                    GalleryTab.AUDIO -> Icons.Filled.MusicNote
+                    GalleryTab.DOCUMENTS -> Icons.Filled.Description
+                    GalleryTab.APK -> Icons.Filled.GetApp
+                },
+                selected = selected == tab,
+                onClick = { onSelect(tab) },
+                modifier = Modifier.widthIn(min = 104.dp)
+            )
+        }
     }
 }
 
@@ -1110,6 +1273,7 @@ private fun MediaTile(
     onToggleSelect: () -> Unit
 ) {
     val thumbnail = rememberThumbnail(item, 256)
+    val animatedGif = rememberAnimatedGif(item)
 
     Box(
         modifier = Modifier
@@ -1122,14 +1286,18 @@ private fun MediaTile(
                 onLongClick = onToggleSelect
             )
             .semantics {
-                contentDescription = if (item.kind == MediaKind.VIDEO) {
-                    "Video ${item.name}, ${item.durationMs?.let(::formatDuration) ?: ""}"
-                } else {
-                    "Photo ${item.name}"
+                contentDescription = when (item.kind) {
+                    MediaKind.VIDEO -> "Video ${item.name}, ${item.durationMs?.let(::formatDuration) ?: ""}"
+                    MediaKind.DOCUMENT -> "Document ${item.name}"
+                    MediaKind.APK -> "APK ${item.name}"
+                    else -> "Photo ${item.name}"
                 }
             }
     ) {
-        if (thumbnail != null) {
+        val gif = animatedGif
+        if (gif != null) {
+            AnimatedGifImage(gif, modifier = Modifier.fillMaxSize())
+        } else if (thumbnail != null) {
             Image(
                 bitmap = thumbnail.asImageBitmap(),
                 contentDescription = null,
@@ -1238,6 +1406,456 @@ private fun CircleCheckToggle(
                 tint = MaterialTheme.colorScheme.onPrimary,
                 modifier = Modifier.size(14.dp)
             )
+        }
+    }
+}
+
+// --------------------------------------------------------------------- search
+
+@Composable
+private fun SearchBar(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    val focusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        NamedActionIconButton(
+            name = "Close search",
+            icon = Icons.AutoMirrored.Filled.ArrowBack,
+            onClick = onClose
+        )
+        Spacer(Modifier.width(8.dp))
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            singleLine = true,
+            placeholder = { Text("Search files by name") },
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+            trailingIcon = if (query.isNotEmpty()) {
+                {
+                    IconButton(onClick = { onQueryChange("") }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Clear search")
+                    }
+                }
+            } else null,
+            modifier = Modifier.weight(1f).focusRequester(focusRequester)
+        )
+    }
+}
+
+@Composable
+private fun SearchHint() {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(36.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.Filled.Search,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(52.dp)
+        )
+        Spacer(Modifier.height(14.dp))
+        Text(
+            "Search all your files",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "Photos, videos, audio, documents and APKs — one result list.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun SearchEmpty(query: String) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(36.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.Filled.Search,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(52.dp)
+        )
+        Spacer(Modifier.height(14.dp))
+        Text(
+            "No files found for “$query”",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+private fun SearchResults(
+    items: List<MediaItem>,
+    onItemClick: (MediaItem, Int) -> Unit
+) {
+    LazyColumn(
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        items(items, key = { it.uri }) { item ->
+            val index = items.indexOf(item)
+            SearchResultRow(
+                item = item,
+                onClick = { onItemClick(item, index) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun SearchResultRow(item: MediaItem, onClick: () -> Unit) {
+    val context = LocalContext.current
+    val mediaThumb = rememberThumbnail(item, 128)
+    val appIcon by produceState<Bitmap?>(initialValue = null, item.uri) {
+        value = if (item.kind == MediaKind.APK) {
+            withContext(Dispatchers.IO) {
+                loadApkIconFor(
+                    context,
+                    name = item.name,
+                    mimeType = item.mimeType,
+                    sizeBytes = item.sizeBytes,
+                    uri = item.uri,
+                    storedPath = MediaStoreRepository.filePathFor(context, item)
+                )
+            }
+        } else null
+    }
+    val docThumb by produceState<Bitmap?>(initialValue = null, item.uri) {
+        value = withContext(Dispatchers.IO) {
+            MediaStoreRepository.loadDocumentThumbnail(context, item, 128)
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center
+        ) {
+            val thumb = when (item.kind) {
+                MediaKind.IMAGE, MediaKind.VIDEO, MediaKind.AUDIO -> mediaThumb
+                else -> appIcon ?: docThumb
+            }
+            if (thumb != null) {
+                Image(
+                    bitmap = thumb.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    when (item.kind) {
+                        MediaKind.VIDEO -> Icons.Filled.Movie
+                        MediaKind.AUDIO -> Icons.Filled.MusicNote
+                        MediaKind.DOCUMENT -> Icons.Filled.Description
+                        MediaKind.APK -> Icons.Filled.GetApp
+                        else -> Icons.Filled.Image
+                    },
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                item.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                buildString {
+                    append(
+                        when (item.kind) {
+                            MediaKind.IMAGE -> "Photo"
+                            MediaKind.VIDEO -> "Video"
+                            MediaKind.AUDIO -> "Audio"
+                            MediaKind.DOCUMENT -> "Document"
+                            MediaKind.APK -> "APK"
+                        }
+                    )
+                    append(" · ")
+                    append(formatSize(item.sizeBytes))
+                    item.relativePath?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------- documents / APKs
+
+/** Opens a file: APKs go straight to the package installer, others to a chooser. */
+private fun openFile(context: Context, item: MediaItem) {
+    if (item.kind == MediaKind.APK ||
+        item.name.endsWith(".apk", ignoreCase = true) ||
+        item.mimeType == "application/vnd.android.package-archive"
+    ) {
+        installApk(context, item)
+        return
+    }
+    val mime = item.mimeType.takeIf { it.isNotBlank() && it != "application/octet-stream" }
+        ?: com.alex.photoeditor.core.SystemTrash.mimeTypeForName(item.name)
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(item.uri, mime)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        clipData = ClipData.newUri(context.contentResolver, "file", item.uri)
+    }
+    runCatching { context.startActivity(Intent.createChooser(intent, "Open with")) }
+        .onFailure {
+            android.widget.Toast.makeText(
+                context,
+                "No app found to open this file.",
+                android.widget.Toast.LENGTH_SHORT
+            ).show()
+        }
+}
+
+private const val APK_MIME = "application/vnd.android.package-archive"
+
+private fun apkViewIntent(dataUri: Uri, context: Context): Intent =
+    Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(dataUri, APK_MIME)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        clipData = ClipData.newUri(context.contentResolver, "apk", dataUri)
+    }
+
+/**
+ * On Android 8+ the caller must both declare REQUEST_INSTALL_PACKAGES and be
+ * granted "Install unknown apps" by the user. Without the declaration the
+ * installer resolves but silently does nothing — hence the explicit check
+ * here that takes the user to the setting with a clear explanation.
+ */
+private fun installApk(context: Context, item: MediaItem) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+        !context.packageManager.canRequestPackageInstalls()
+    ) {
+        runCatching {
+            context.startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${context.packageName}")
+                )
+            )
+        }
+        android.widget.Toast.makeText(
+            context,
+            "Allow Edit by Alex to install apps, then tap the APK again.",
+            android.widget.Toast.LENGTH_LONG
+        ).show()
+        return
+    }
+    runCatching { context.startActivity(apkViewIntent(item.uri, context)) }
+        .onFailure {
+            // Some providers won't grant the installer read access to their
+            // content URI. Copy into our own FileProvider space and retry.
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+                installApkFromCopy(context, item)
+            }
+        }
+}
+
+private suspend fun installApkFromCopy(context: Context, item: MediaItem) =
+    withContext(Dispatchers.IO) {
+        val dir = File(context.cacheDir, "share").apply { mkdirs() }
+        val safeName = item.name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val copy = File(dir, safeName)
+        val copied = runCatching {
+            context.contentResolver.openInputStream(item.uri)?.use { input ->
+                copy.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
+            } != null && copy.length() > 0
+        }.getOrDefault(false)
+        if (!copied) {
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(
+                    context,
+                    "Could not read this APK to install it.",
+                    android.widget.Toast.LENGTH_LONG
+                ).show()
+            }
+            return@withContext
+        }
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.fileprovider",
+            copy
+        )
+        withContext(Dispatchers.Main) {
+            runCatching { context.startActivity(apkViewIntent(uri, context)) }
+                .onFailure {
+                    android.widget.Toast.makeText(
+                        context,
+                        "No app can install APKs on this device.",
+                        android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+        }
+    }
+
+@Composable
+private fun FileList(
+    items: List<MediaItem>,
+    selectionMode: Boolean,
+    selectedIds: Set<Long>,
+    onItemClick: (MediaItem) -> Unit,
+    onToggleSelect: (MediaItem) -> Unit
+) {
+    LazyColumn(
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        items(items, key = { it.uri }) { item ->
+            FileRow(
+                item = item,
+                selectionMode = selectionMode,
+                selected = item.id in selectedIds,
+                onClick = { if (selectionMode) onToggleSelect(item) else onItemClick(item) },
+                onToggleSelect = { onToggleSelect(item) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun FileRow(
+    item: MediaItem,
+    selectionMode: Boolean,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onToggleSelect: () -> Unit
+) {
+    val context = LocalContext.current
+    val appIcon by produceState<Bitmap?>(initialValue = null, item.uri) {
+        value = if (item.kind == MediaKind.APK) {
+            withContext(Dispatchers.IO) {
+                loadApkIconFor(
+                    context,
+                    name = item.name,
+                    mimeType = item.mimeType,
+                    sizeBytes = item.sizeBytes,
+                    uri = item.uri,
+                    storedPath = MediaStoreRepository.filePathFor(context, item)
+                )
+            }
+        } else null
+    }
+    val docThumb by produceState<Bitmap?>(initialValue = null, item.uri) {
+        value = withContext(Dispatchers.IO) {
+            MediaStoreRepository.loadDocumentThumbnail(context, item, 128)
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onToggleSelect
+            )
+            .semantics {
+                contentDescription = when (item.kind) {
+                    MediaKind.APK -> "APK ${item.name}"
+                    else -> "Document ${item.name}"
+                }
+            }
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(48.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center
+        ) {
+            val icon = appIcon
+            val docBitmap = docThumb
+            if (icon != null) {
+                Image(
+                    bitmap = icon.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(3.dp)
+                )
+            } else if (docBitmap != null) {
+                Image(
+                    bitmap = docBitmap.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Icon(
+                    if (item.kind == MediaKind.APK) Icons.Filled.GetApp else Icons.Filled.Description,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                item.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                buildString {
+                    append(formatSize(item.sizeBytes))
+                    append(" · ")
+                    append(formatDate(item.dateAdded))
+                    item.relativePath?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (selectionMode) {
+            Spacer(Modifier.width(8.dp))
+            SelectionBadge(selected = selected)
         }
     }
 }
@@ -1359,15 +1977,22 @@ private fun AudioRow(
 private const val MODEL_BUCKET_KEY = "__model__"
 private const val USER_BUCKET_KEY_PREFIX = "user:"
 
-/** The folder a media item lives in; the phone's model for items outside any folder. */
+/** The folder a file lives in: bucket name, then its real path, then the model. */
 private fun folderLabel(item: MediaItem): String =
     item.bucket?.takeIf { it.isNotBlank() }
+        ?: item.relativePath?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
         ?: Build.MODEL.takeIf { it.isNotBlank() }
         ?: "Internal storage"
 
-/** Strict grouping key: same folder iff the same bucket id. */
+/**
+ * Strict grouping key: bucket id first; files without one (e.g. documents in
+ * the Files collection on some devices) group by their real relative path so
+ * they still land in their own folders instead of one giant bucket.
+ */
 private fun folderKey(item: MediaItem): String =
-    item.bucketId?.toString() ?: MODEL_BUCKET_KEY
+    item.bucketId?.toString()
+        ?: item.relativePath?.takeIf { it.isNotBlank() }?.let { "path:$it" }
+        ?: MODEL_BUCKET_KEY
 
 /** One folder (real or user-created) as a group of items. */
 private class FolderGroup(
@@ -1525,6 +2150,7 @@ private fun FolderOrderRow(
     val thumbnail by produceState<Bitmap?>(initialValue = null, cover?.uri) {
         value = cover?.let { MediaStoreRepository.loadThumbnail(context, it, 128) }
     }
+    val animatedGif = rememberAnimatedGif(cover)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1544,7 +2170,10 @@ private fun FolderOrderRow(
             contentAlignment = Alignment.Center
         ) {
             val coverBitmap = thumbnail
-            if (coverBitmap != null) {
+            val coverGif = animatedGif
+            if (coverGif != null) {
+                AnimatedGifImage(coverGif, modifier = Modifier.fillMaxSize())
+            } else if (coverBitmap != null) {
                 Image(
                     bitmap = coverBitmap.asImageBitmap(),
                     contentDescription = null,
@@ -1625,6 +2254,7 @@ private fun FolderTile(
     val thumbnail by produceState<Bitmap?>(initialValue = null, cover?.uri) {
         value = cover?.let { MediaStoreRepository.loadThumbnail(context, it, 192) }
     }
+    val animatedGif = rememberAnimatedGif(cover)
 
     Column(
         modifier = Modifier
@@ -1650,7 +2280,10 @@ private fun FolderTile(
             contentAlignment = Alignment.Center
         ) {
             val coverBitmap = thumbnail
-            if (coverBitmap != null) {
+            val coverGif = animatedGif
+            if (coverGif != null) {
+                AnimatedGifImage(coverGif, modifier = Modifier.fillMaxSize())
+            } else if (coverBitmap != null) {
                 Image(
                     bitmap = coverBitmap.asImageBitmap(),
                     contentDescription = null,
@@ -1659,7 +2292,11 @@ private fun FolderTile(
                 )
             } else {
                 Icon(
-                    Icons.Filled.Folder,
+                    when (cover?.kind) {
+                        MediaKind.DOCUMENT -> Icons.Filled.Description
+                        MediaKind.APK -> Icons.Filled.GetApp
+                        else -> Icons.Filled.Folder
+                    },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(44.dp)
@@ -1777,6 +2414,46 @@ private fun NewFolderDialog(
         confirmButton = {
             TextButton(onClick = { onCreate(trimmed) }, enabled = usable) {
                 Text("Create")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
+}
+
+@Composable
+private fun RenameDialog(
+    title: String,
+    initial: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var name by remember { mutableStateOf(initial) }
+    val trimmed = name.trim()
+    val usable = trimmed.isNotEmpty() &&
+        trimmed.length <= 120 &&
+        !trimmed.contains('/') &&
+        !trimmed.contains('\\') &&
+        trimmed.none { it.isISOControl() } &&
+        trimmed != "." &&
+        trimmed != ".." &&
+        trimmed != initial
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true,
+                label = { Text("New name") }
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(trimmed) }, enabled = usable) {
+                Text("Rename")
             }
         },
         dismissButton = {
@@ -1954,6 +2631,8 @@ private fun EmptyTab(tab: GalleryTab) {
                 GalleryTab.PHOTOS -> Icons.Filled.Image
                 GalleryTab.VIDEOS -> Icons.Filled.Movie
                 GalleryTab.AUDIO -> Icons.Filled.MusicNote
+                GalleryTab.DOCUMENTS -> Icons.Filled.Description
+                GalleryTab.APK -> Icons.Filled.GetApp
             },
             contentDescription = null,
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1965,6 +2644,8 @@ private fun EmptyTab(tab: GalleryTab) {
                 GalleryTab.PHOTOS -> "No photos found"
                 GalleryTab.VIDEOS -> "No videos found"
                 GalleryTab.AUDIO -> "No audio found"
+                GalleryTab.DOCUMENTS -> "No documents found"
+                GalleryTab.APK -> "No APK files found"
             },
             style = MaterialTheme.typography.titleMedium,
             color = MaterialTheme.colorScheme.onSurface
@@ -1996,6 +2677,53 @@ private fun ErrorState(message: String, onRetry: () -> Unit) {
 
 // ------------------------------------------------------------- file ops
 
+/** Renames one file, preferring MediaStore so its row follows the new name. */
+private fun renameMediaItem(context: Context, item: MediaItem, newName: String): Boolean {
+    val viaProvider = runCatching {
+        context.contentResolver.update(
+            item.uri,
+            ContentValues().apply { put(MediaStore.MediaColumns.DISPLAY_NAME, newName) },
+            null,
+            null
+        )
+    }.getOrDefault(0)
+    if (viaProvider > 0) return true
+
+    val path = MediaStoreRepository.filePathFor(context, item) ?: return false
+    val source = java.io.File(path)
+    val target = java.io.File(source.parentFile ?: return false, newName)
+    if (!source.exists() || target.exists()) return false
+    if (!source.renameTo(target)) return false
+    android.media.MediaScannerConnection.scanFile(
+        context, arrayOf(path, target.absolutePath), arrayOf(item.mimeType), null
+    )
+    return true
+}
+
+/**
+ * Renames the directory on disk (all-files access makes this a plain rename)
+ * and rescans every contained file at its new path so MediaStore follows.
+ */
+private fun renameFolderOnDisk(context: Context, group: FolderGroup, newName: String): Boolean {
+    val oldDir = group.path?.let { java.io.File(it.trimEnd('/')) } ?: return false
+    if (!oldDir.isDirectory) return false
+    val parent = oldDir.parentFile ?: return false
+    val target = java.io.File(parent, newName)
+    if (target.exists()) return false
+
+    val contained = runCatching { oldDir.walkTopDown().filter { it.isFile }.toList() }
+        .getOrDefault(emptyList())
+    if (!oldDir.renameTo(target)) return false
+
+    if (contained.isNotEmpty()) {
+        val newPaths = contained.map { file ->
+            java.io.File(target, file.relativeTo(oldDir).path).absolutePath
+        }.toTypedArray()
+        android.media.MediaScannerConnection.scanFile(context, newPaths, null, null)
+    }
+    return true
+}
+
 /** Copies one media item into `<storage root>/<folder>/`; false if anything failed. */
 private suspend fun copyIntoFolder(
     context: Context,
@@ -2024,6 +2752,31 @@ private suspend fun copyIntoFolder(
             dest.outputStream().use { output -> input.copyTo(output, 64 * 1024) }
         } != null && dest.length() > 0
     }.getOrDefault(false)
+}
+
+/** Decodes an animated GIF once per item; null for everything else. */
+@Composable
+private fun rememberAnimatedGif(item: MediaItem?): Drawable? {
+    val context = LocalContext.current
+    return produceState<Drawable?>(initialValue = null, item?.uri) {
+        value = item?.let { media ->
+            withContext(Dispatchers.IO) { MediaStoreRepository.loadAnimatedGif(context, media) }
+        }
+    }.value
+}
+
+/** Hosts the self-animating drawable inside Compose. */
+@Composable
+private fun AnimatedGifImage(drawable: Drawable, modifier: Modifier = Modifier) {
+    AndroidView(
+        factory = { ctx ->
+            ImageView(ctx).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setImageDrawable(drawable)
+            }
+        },
+        modifier = modifier
+    )
 }
 
 /** Decodes a grid-tile thumbnail off the main thread, once per item. */

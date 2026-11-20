@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Movie
@@ -103,6 +104,7 @@ fun TrashScreen(vm: GalleryViewModel) {
     var previewRow by remember { mutableStateOf<TrashRowData?>(null) }
     var selectedIds by remember { mutableStateOf(emptySet<String>()) }
     var confirmDeleteSelected by remember { mutableStateOf(false) }
+    var showDiagnostics by remember { mutableStateOf(false) }
     val selectionMode = selectedIds.isNotEmpty()
 
     LaunchedEffect(Unit) { vm.refreshTrash() }
@@ -221,7 +223,10 @@ fun TrashScreen(vm: GalleryViewModel) {
                 "Trash",
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f).padding(start = 4.dp)
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 4.dp)
+                    .combinedClickable(onClick = {}, onLongClick = { showDiagnostics = true })
             )
             Spacer(Modifier.width(4.dp))
             if (selectionMode) {
@@ -338,6 +343,34 @@ fun TrashScreen(vm: GalleryViewModel) {
                     else -> row.systemEntry?.let { vm.deleteSystemTrashEntryForever(it) }
                 }
                 previewRow = null
+            }
+        )
+    }
+
+    if (showDiagnostics) {
+        val root = com.alex.photoeditor.core.FolderMaker.sharedStorageRoot()
+        val fromProvider = vm.systemTrashItems.count { it.uri != null }
+        AlertDialog(
+            onDismissRequest = { showDiagnostics = false },
+            title = { Text("Trash diagnostics") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("All-files access: ${com.alex.photoeditor.ui.components.hasAllFilesAccess(context)}")
+                    Text("Storage root: ${root.absolutePath}")
+                    Text("Root entries visible: ${runCatching { root.listFiles()?.size }.getOrNull() ?: -1}")
+                    Text("MediaStore trash rows: $fromProvider · filesystem rows: ${vm.systemTrashItems.size - fromProvider}")
+                    Text("App bin rows: ${vm.trashEntries.size}")
+                    Text("Samples (up to 8):", style = MaterialTheme.typography.labelSmall)
+                    vm.systemTrashItems.take(8).forEach { entry ->
+                        Text(
+                            "${entry.name} — ${entry.path ?: entry.uri}",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showDiagnostics = false }) { Text("Close") }
             }
         )
     }
@@ -497,7 +530,8 @@ private fun TrashRow(
                         MediaKind.VIDEO -> Icons.Filled.Movie
                         MediaKind.AUDIO -> Icons.Filled.MusicNote
                         MediaKind.IMAGE -> Icons.Filled.Image
-                        null -> Icons.AutoMirrored.Filled.InsertDriveFile
+                        MediaKind.DOCUMENT -> Icons.Filled.Description
+                        MediaKind.APK, null -> Icons.AutoMirrored.Filled.InsertDriveFile
                     },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,

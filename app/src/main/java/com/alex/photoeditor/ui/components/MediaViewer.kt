@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Info
@@ -75,7 +77,9 @@ import com.alex.photoeditor.core.MediaItem
 import com.alex.photoeditor.core.MediaKind
 import com.alex.photoeditor.core.MediaStoreRepository
 import com.alex.photoeditor.ui.components.NamedActionIconButton
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 /**
  * Fullscreen, dark-room media viewer.
@@ -137,6 +141,9 @@ fun MediaViewer(
                     openWith(context, item)?.let { transientMessage = it }
                 })
                 MediaKind.AUDIO -> AudioPage(item, isCurrent, onOpenWith = {
+                    openWith(context, item)?.let { transientMessage = it }
+                })
+                MediaKind.DOCUMENT, MediaKind.APK -> DocumentPage(item, onOpenWith = {
                     openWith(context, item)?.let { transientMessage = it }
                 })
             }
@@ -242,7 +249,15 @@ private fun PhotoPage(
     // Loading and failure are different states on purpose: a file the
     // platform cannot decode used to leave the spinner up forever, which is
     // indistinguishable from "the app froze".
+    val gifDrawable by produceState<android.graphics.drawable.Drawable?>(
+        initialValue = null, item.uri
+    ) {
+        value = withContext(Dispatchers.IO) {
+            MediaStoreRepository.loadAnimatedGif(context, item)
+        }
+    }
     val state by produceState<PhotoLoadState>(PhotoLoadState.Loading, item.uri) {
+        if (MediaStoreRepository.isGifItem(item)) return@produceState
         value = runCatching { MediaStoreRepository.loadFullImage(context, item) }
             .fold(
                 onSuccess = { bmp -> if (bmp != null) PhotoLoadState.Ready(bmp) else PhotoLoadState.Failed },
@@ -264,7 +279,7 @@ private fun PhotoPage(
         onZoomChanged(scale > 1.01f)
     }
 
-    if (state is PhotoLoadState.Failed) {
+    if (state is PhotoLoadState.Failed && gifDrawable == null) {
         PlaybackFailure(
             message = "This image could not be opened.",
             onOpenWith = onOpenWith
@@ -284,14 +299,15 @@ private fun PhotoPage(
             },
         contentAlignment = Alignment.Center
     ) {
-        val bmp = (state as? PhotoLoadState.Ready)?.bitmap
-        if (bmp == null) {
-            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
-        } else {
-            Image(
-                bitmap = bmp.asImageBitmap(),
-                contentDescription = item.displayName,
-                contentScale = ContentScale.Fit,
+        val gif = gifDrawable
+        if (gif != null) {
+            AndroidView(
+                factory = { ctx ->
+                    android.widget.ImageView(ctx).apply {
+                        scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                        setImageDrawable(gif)
+                    }
+                },
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
@@ -301,6 +317,25 @@ private fun PhotoPage(
                         translationY = offset.y
                     }
             )
+        } else {
+            val bmp = (state as? PhotoLoadState.Ready)?.bitmap
+            if (bmp == null) {
+                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            } else {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = item.displayName,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = scale
+                            scaleY = scale
+                            translationX = offset.x
+                            translationY = offset.y
+                        }
+                )
+            }
         }
     }
 }
@@ -490,6 +525,27 @@ private fun VideoPage(
 }
 
 // ---------------------------------------------------------------- audio page
+
+/** Fallback page for document/APK items that reach the media viewer. */
+@Composable
+private fun DocumentPage(item: MediaItem, onOpenWith: () -> Unit) {
+    Column(
+        modifier = Modifier.fillMaxSize().padding(40.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            Icons.AutoMirrored.Filled.InsertDriveFile,
+            contentDescription = null,
+            tint = Color.White,
+            modifier = Modifier.size(72.dp)
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(item.displayName, color = Color.White, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(20.dp))
+        OutlinedButton(onClick = onOpenWith) { Text("Open with another app") }
+    }
+}
 
 @Composable
 private fun AudioPage(

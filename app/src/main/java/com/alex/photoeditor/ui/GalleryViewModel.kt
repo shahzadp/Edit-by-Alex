@@ -21,7 +21,9 @@ import kotlinx.coroutines.withContext
 enum class GalleryTab(val label: String, val kind: MediaKind) {
     PHOTOS("Photos", MediaKind.IMAGE),
     VIDEOS("Videos", MediaKind.VIDEO),
-    AUDIO("Audio", MediaKind.AUDIO)
+    AUDIO("Audio", MediaKind.AUDIO),
+    DOCUMENTS("Documents", MediaKind.DOCUMENT),
+    APK("APK", MediaKind.APK)
 }
 
 /**

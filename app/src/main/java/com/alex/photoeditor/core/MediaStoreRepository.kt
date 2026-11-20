@@ -2,9 +2,14 @@ package com.alex.photoeditor.core
 
 import android.content.ContentValues
 import android.content.Context
+import androidx.core.content.FileProvider
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.graphics.Matrix
+import android.graphics.pdf.PdfRenderer
+import android.graphics.drawable.AnimatedImageDrawable
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -14,8 +19,8 @@ import kotlinx.coroutines.withContext
 import androidx.exifinterface.media.ExifInterface
 import java.util.Locale
 
-/** The three media families the gallery can browse. */
-enum class MediaKind { IMAGE, VIDEO, AUDIO }
+/** The file families the gallery can browse. */
+enum class MediaKind { IMAGE, VIDEO, AUDIO, DOCUMENT, APK }
 
 /** One media file visible through MediaStore. */
 data class MediaItem(
@@ -50,7 +55,12 @@ data class MediaItem(
     /** Audio only: track title, artist and album when the tag is present. */
     val title: String?,
     val artist: String?,
-    val album: String?
+    val album: String?,
+    /**
+     * Set for files found directly on disk (documents/APKs) so every file
+     * operation can use the real path instead of a MediaStore DATA lookup.
+     */
+    val absolutePath: String? = null
 ) {
     /** Human-readable name: the tag title for audio, the file name otherwise. */
     val displayName: String
@@ -79,17 +89,298 @@ object MediaStoreRepository {
     suspend fun query(context: Context, kind: MediaKind): List<MediaItem> =
         withContext(Dispatchers.IO) {
             when (kind) {
-                MediaKind.IMAGE -> queryCollection(context, MediaKind.IMAGE)
-                MediaKind.VIDEO -> queryCollection(context, MediaKind.VIDEO)
-                MediaKind.AUDIO -> queryCollection(context, MediaKind.AUDIO)
+                MediaKind.IMAGE -> queryCollection(context, kind)
+                MediaKind.VIDEO -> queryCollection(context, kind)
+                MediaKind.AUDIO -> queryCollection(context, kind)
+                MediaKind.DOCUMENT, MediaKind.APK -> {
+                    // MediaStore is only one index and OEMs leave non-media
+                    // rows out of it. All-files access lets us walk shared
+                    // storage directly — that is the authoritative source,
+                    // with MediaStore rows merged for virtual/cloud files.
+                    val fromDisk = queryFilesFromDisk(context, kind)
+                    val fromProvider = queryFiles(context, kind)
+                    val seen = HashSet<String>()
+                    (fromDisk + fromProvider).filter { item ->
+                        val key = item.absolutePath
+                            ?: filePathFor(context, item)
+                            ?: item.uri.toString()
+                        seen.add(key)
+                    }
+                }
             }
         }
+
+    /**
+     * Walks shared storage with the all-files access permission the app
+     * requires at launch, so documents and APKs appear with their real
+     * folders even when MediaStore doesn't index non-media files.
+     */
+    private fun queryFilesFromDisk(context: Context, kind: MediaKind): List<MediaItem> {
+        val extensions = if (kind == MediaKind.APK) {
+            setOf("apk")
+        } else {
+            DOCUMENT_EXTENSIONS.toSet()
+        }
+        val roots = mutableListOf<java.io.File>(FolderMaker.sharedStorageRoot())
+        context.getExternalFilesDirs(null).drop(1).forEach { appDir ->
+            appDir?.parentFile?.parentFile?.parentFile?.let(roots::add)
+        }
+
+        val result = ArrayList<MediaItem>()
+        val seen = HashSet<String>()
+        // MaterialFiles lists one directory at a time — never the whole tree.
+        // Mirror that: bounded depth + a wall-clock budget, so a huge storage
+        // can never leave the gallery stuck on "loading".
+        val deadline = System.currentTimeMillis() + 2500L
+        roots.forEach { root ->
+            fun walk(dir: java.io.File, depth: Int) {
+                if (depth > 3 || result.size >= MAX_FILES_ITEMS ||
+                    System.currentTimeMillis() > deadline
+                ) return
+                val children = runCatching { dir.listFiles() }.getOrNull() ?: return
+                children.forEach { file ->
+                    when {
+                        file.isDirectory -> {
+                            val name = file.name
+                            // Android/data and hidden dirs are off-limits (or
+                            // trash) — ordinary document folders are not.
+                            if (name == "Android" || name.startsWith(".") ||
+                                name.equals("cache", ignoreCase = true)
+                            ) return@forEach
+                            walk(file, depth + 1)
+                        }
+                        file.isFile -> {
+                            val ext = file.name.substringAfterLast('.', "").lowercase(Locale.US)
+                            if (ext !in extensions) return@forEach
+                            val path = file.absolutePath
+                            if (!seen.add(path)) return@forEach
+                            val parent = file.parentFile ?: return@forEach
+                            val relativeParent = runCatching {
+                                parent.absolutePath.removePrefix(root.absolutePath).trimStart('/')
+                            }.getOrDefault("")
+                            val uri = runCatching {
+                                FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    file
+                                )
+                            }.getOrNull() ?: return@forEach
+                            result.add(
+                                MediaItem(
+                                    id = path.hashCode().toLong(),
+                                    uri = uri,
+                                    kind = kind,
+                                    name = file.name,
+                                    mimeType = SystemTrash.mimeTypeForName(file.name),
+                                    sizeBytes = file.length(),
+                                    dateAdded = file.lastModified() / 1000,
+                                    dateModified = file.lastModified() / 1000,
+                                    durationMs = null,
+                                    width = null,
+                                    height = null,
+                                    relativePath = if (relativeParent.isBlank()) null else "$relativeParent/",
+                                    volumeName = "external",
+                                    bucket = parent.name,
+                                    bucketId = parent.absolutePath.hashCode().toLong(),
+                                    title = null,
+                                    artist = null,
+                                    album = null,
+                                    absolutePath = path
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+            walk(root, 0)
+        }
+        return result
+    }
+
+    /** Extensions grouped as "documents" in the gallery. */
+    private val DOCUMENT_EXTENSIONS = listOf(
+        "pdf", "txt", "text", "doc", "docx", "odt", "rtf", "md", "tex",
+        "xls", "xlsx", "ods", "csv", "ppt", "pptx", "odp", "epub", "mobi",
+        "azw3", "json", "xml", "yaml", "yml", "log", "zip", "rar", "7z",
+        "tar", "gz", "tgz"
+    )
+
+    private const val MAX_FILES_ITEMS = 2_000
+
+    /**
+     * Lists documents / APKs from the Files collection on every storage
+     * volume. Unlike the media collections, Files indexes non-media types;
+     * selection is by extension and MIME (some providers mislabel APKs, so
+     * both are checked). Trashed rows are excluded by the provider's default
+     * match mode, and explicitly filtered on Android 11+ where the column
+     * exists.
+     */
+    private fun queryFiles(context: Context, kind: MediaKind): List<MediaItem> {
+        val extensions = when (kind) {
+            MediaKind.APK -> listOf("apk")
+            else -> DOCUMENT_EXTENSIONS
+        }
+        val byExtension = extensions.joinToString(" OR ") {
+            "${MediaStore.MediaColumns.DISPLAY_NAME} LIKE '%.${it}'"
+        }
+        // MATCH_EXCLUDE via query args is the documented way to leave trashed
+        // rows out. A literal IS_TRASHED=0 selection matches nothing on
+        // providers that report NULL for non-media rows — which is why the
+        // document list went empty.
+        val selection = buildString {
+            append("(")
+            append(byExtension)
+            if (kind == MediaKind.APK) {
+                append(" OR ${MediaStore.MediaColumns.MIME_TYPE}='application/vnd.android.package-archive'")
+            } else {
+                append(
+                    " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'text/%'" +
+                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/pdf'" +
+                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/msword'" +
+                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/vnd.ms-%'" +
+                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/vnd.openxmlformats-%'" +
+                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/epub%'" +
+                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/zip'" +
+                        " OR ${MediaStore.MediaColumns.MIME_TYPE} LIKE 'application/x-7z%'"
+                )
+            }
+            append(")")
+        }
+
+        val projection = arrayOf(
+            MediaStore.MediaColumns._ID,
+            MediaStore.MediaColumns.DISPLAY_NAME,
+            MediaStore.MediaColumns.MIME_TYPE,
+            MediaStore.MediaColumns.SIZE,
+            MediaStore.MediaColumns.DATE_ADDED,
+            MediaStore.MediaColumns.DATE_MODIFIED,
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            MediaStore.MediaColumns.VOLUME_NAME,
+            MediaStore.MediaColumns.BUCKET_DISPLAY_NAME,
+            MediaStore.MediaColumns.BUCKET_ID,
+            MediaStore.MediaColumns.DATA
+        )
+
+        // "external" always works for the primary volume; some OEMs ignore
+        // the StorageManager volume names, so include both and dedup by URI.
+        val volumes = buildList {
+            add("external")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                runCatching {
+                    val manager = context.getSystemService(android.os.storage.StorageManager::class.java)
+                    manager.storageVolumes.mapNotNull { it.mediaStoreVolumeName }
+                }.getOrDefault(emptyList()).forEach { if (it !in this) add(it) }
+            }
+        }
+
+        val queryArgs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            android.os.Bundle().apply {
+                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_EXCLUDE)
+                putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                putString(
+                    android.content.ContentResolver.QUERY_ARG_SQL_SORT_ORDER,
+                    "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+                )
+            }
+        } else null
+
+        val items = ArrayList<MediaItem>()
+        val seen = HashSet<String>()
+        volumes.forEach { volume ->
+            val uri = MediaStore.Files.getContentUri(volume)
+            val cursor = runCatching {
+                if (queryArgs != null) {
+                    context.contentResolver.query(uri, projection, queryArgs, null)
+                } else {
+                    context.contentResolver.query(
+                        uri, projection, selection, null,
+                        "${MediaStore.MediaColumns.DATE_ADDED} DESC"
+                    )
+                }
+            }.getOrNull()
+            runCatching {
+                cursor?.use { c ->
+                    val idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                    val nameCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)
+                    val mimeCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
+                    val sizeCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE)
+                    val addedCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_ADDED)
+                    val modifiedCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
+                    val relativeCol = c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                    val volumeCol = c.getColumnIndex(MediaStore.MediaColumns.VOLUME_NAME)
+                    val bucketCol = c.getColumnIndex(MediaStore.MediaColumns.BUCKET_DISPLAY_NAME)
+                    val bucketIdCol = c.getColumnIndex(MediaStore.MediaColumns.BUCKET_ID)
+                    val dataCol = c.getColumnIndex(MediaStore.MediaColumns.DATA)
+
+                    while (c.moveToNext() && items.size < MAX_FILES_ITEMS) {
+                        val id = c.getLong(idCol)
+                        val itemUri = Uri.withAppendedPath(uri, id.toString())
+                        if (!seen.add(itemUri.toString())) continue
+                        val name = c.getString(nameCol) ?: "Unknown"
+                        val data = if (dataCol >= 0) c.getString(dataCol) else null
+                        // Providers often leave RELATIVE_PATH / BUCKET empty for
+                        // non-media rows; the real DATA path still tells us
+                        // which folder the file lives in.
+                        val relative = (if (relativeCol >= 0) c.getString(relativeCol) else null)
+                            ?: data?.let(::relativeDirectoryFromData)
+                        val bucket = (if (bucketCol >= 0) c.getString(bucketCol) else null)
+                            ?: relative?.trimEnd('/')?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+                        items.add(
+                            MediaItem(
+                                id = id,
+                                uri = itemUri,
+                                kind = kind,
+                                name = name,
+                                mimeType = c.getString(mimeCol)
+                                    ?.takeIf { it.isNotBlank() && it != "application/octet-stream" }
+                                    ?: SystemTrash.mimeTypeForName(name),
+                                sizeBytes = c.getLong(sizeCol),
+                                dateAdded = c.getLong(addedCol),
+                                dateModified = c.getLong(modifiedCol),
+                                durationMs = null,
+                                width = null,
+                                height = null,
+                                relativePath = relative,
+                                volumeName = if (volumeCol >= 0) c.getString(volumeCol) else volume,
+                                bucket = bucket,
+                                bucketId = if (bucketIdCol >= 0 && !c.isNull(bucketIdCol)) {
+                                    c.getLong(bucketIdCol).takeIf { it != 0L }
+                                } else null,
+                                title = null,
+                                artist = null,
+                                album = null
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        return items
+    }
+
+    /** Directory portion of a DATA path, relative to the volume root. */
+    private fun relativeDirectoryFromData(data: String): String? {
+        val normalized = data.replace('\\', '/')
+        val dir = normalized.substringBeforeLast('/', "")
+        return when {
+            dir.startsWith("/storage/emulated/0/") ->
+                dir.removePrefix("/storage/emulated/0/") + "/"
+            dir.startsWith("/sdcard/") ->
+                dir.removePrefix("/sdcard/") + "/"
+            dir.startsWith("/storage/") -> {
+                val parts = dir.removePrefix("/storage/").split('/')
+                if (parts.size >= 2) parts.drop(1).joinToString("/") + "/" else null
+            }
+            else -> null
+        }?.takeIf { it != "/" && it.isNotBlank() }
+    }
 
     private fun queryCollection(context: Context, kind: MediaKind): List<MediaItem> {
         val uri = when (kind) {
             MediaKind.IMAGE -> MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             MediaKind.VIDEO -> MediaStore.Video.Media.EXTERNAL_CONTENT_URI
             MediaKind.AUDIO -> MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            MediaKind.DOCUMENT, MediaKind.APK -> MediaStore.Files.getContentUri("external")
         }
 
         // Audio belongs in its real folders too, so the bucket columns are
@@ -156,6 +447,8 @@ object MediaStoreRepository {
                                 MediaKind.IMAGE -> "image/*"
                                 MediaKind.VIDEO -> "video/*"
                                 MediaKind.AUDIO -> "audio/*"
+                                MediaKind.DOCUMENT -> "application/octet-stream"
+                                MediaKind.APK -> "application/vnd.android.package-archive"
                             },
                             sizeBytes = cursor.getLong(sizeCol),
                             dateAdded = cursor.getLong(addedCol),
@@ -231,6 +524,64 @@ object MediaStoreRepository {
         item.mimeType.contains("svg", ignoreCase = true) ||
             item.name.endsWith(".svg", ignoreCase = true)
 
+    /** True when the item is an animated GIF (first-frame thumbnails look broken). */
+    fun isGifItem(item: MediaItem): Boolean =
+        item.mimeType.equals("image/gif", ignoreCase = true) ||
+            item.name.endsWith(".gif", ignoreCase = true)
+
+    /**
+     * Document thumbnail, MaterialFiles-style: PDFs render their first page
+     * with PdfRenderer; other document types fall back to a MIME icon in the
+     * UI. Runs off the main thread and never throws.
+     */
+    suspend fun loadDocumentThumbnail(context: Context, item: MediaItem, size: Int): Bitmap? =
+        withContext(Dispatchers.IO) {
+            if (item.kind != MediaKind.DOCUMENT) return@withContext null
+            if (!item.mimeType.equals("application/pdf", ignoreCase = true) &&
+                !item.name.endsWith(".pdf", ignoreCase = true)
+            ) return@withContext null
+            runCatching {
+                val fd = context.contentResolver.openFileDescriptor(item.uri, "r") ?: return@runCatching null
+                fd.use { descriptor ->
+                    val renderer = PdfRenderer(descriptor)
+                    try {
+                        if (renderer.pageCount == 0) return@use null
+                        val page = renderer.openPage(0)
+                        try {
+                            val height = if (page.width > 0) {
+                                (size.toFloat() * page.height / page.width).toInt()
+                                    .coerceIn(1, size * 2)
+                            } else size
+                            val bitmap = Bitmap.createBitmap(size, height, Bitmap.Config.ARGB_8888)
+                            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            bitmap
+                        } finally {
+                            page.close()
+                        }
+                    } finally {
+                        renderer.close()
+                    }
+                }
+            }.getOrNull()
+        }
+
+    /**
+     * Decodes an animated GIF into a started [AnimatedImageDrawable] (API 28+),
+     * or null when the source is not an animated GIF and the static thumbnail
+     * should be used instead. The drawable owns its animation loop.
+     */
+    fun loadAnimatedGif(context: Context, item: MediaItem): Drawable? {
+        if (!isGifItem(item) || Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return null
+        return runCatching {
+            val source = ImageDecoder.createSource(context.contentResolver, item.uri)
+            val drawable = ImageDecoder.decodeDrawable(source)
+            if (drawable is AnimatedImageDrawable) {
+                drawable.start()
+                drawable
+            } else null
+        }.getOrNull()
+    }
+
     /**
      * Opens an SVG from a content URI and rasterizes it into a Bitmap,
      * bounded to [maxEdge] on the longest side.
@@ -289,8 +640,9 @@ object MediaStoreRepository {
      * (the path exists but is unreadable via regular open(), which callers
      * must handle).
      */
+    /** Absolute path for file operations: real path first, MediaStore DATA second. */
     fun filePathFor(context: Context, item: MediaItem): String? =
-        runCatching {
+        item.absolutePath ?: runCatching {
             context.contentResolver
                 .query(item.uri, arrayOf(android.provider.MediaStore.MediaColumns.DATA), null, null, null)
                 ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
@@ -331,6 +683,7 @@ object MediaStoreRepository {
                             MediaStore.Video.Thumbnails.MINI_KIND, null
                         )
                         MediaKind.AUDIO -> null
+                        MediaKind.DOCUMENT, MediaKind.APK -> null
                     }
                 }
             }.getOrNull()

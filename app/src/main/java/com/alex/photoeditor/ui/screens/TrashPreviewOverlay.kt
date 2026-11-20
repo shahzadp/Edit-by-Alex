@@ -103,7 +103,8 @@ internal fun TrashPreviewOverlay(
             MediaKind.IMAGE -> ImagePreview(row)
             MediaKind.VIDEO -> VideoPreview(row, onOpenWith = { openWith(context, row) })
             MediaKind.AUDIO -> AudioPreview(row)
-            null -> NonMediaPreview(row, onOpenWith = { openWith(context, row) })
+            MediaKind.DOCUMENT, MediaKind.APK, null ->
+                NonMediaPreview(row, onOpenWith = { openWith(context, row) })
         }
 
         // Top scrim
@@ -525,6 +526,15 @@ private fun NonMediaPreview(
         Spacer(Modifier.height(28.dp))
         OutlinedButton(onClick = onOpenWith) {
             Text("Open with another app")
+        }
+        if (!row.fromThisApp) {
+            Spacer(Modifier.height(10.dp))
+            Text(
+                "Files in the device trash may need to be restored before another app can open them.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.White.copy(alpha = 0.55f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
         }
     }
 }

@@ -16,21 +16,38 @@ internal fun isApkTrashFile(name: String, mimeType: String): Boolean =
     mimeType == "application/vnd.android.package-archive" ||
         name.endsWith(".apk", ignoreCase = true)
 
-/**
- * Reads the app icon from a trashed APK, or null when the archive is
- * unreadable (e.g. another app's trash directory is mode 700) or too large.
- *
- * Rows trashed by this app are always readable. Rows trashed by other apps
- * fall back to a generic icon until the user restores them.
- */
-internal fun loadApkIcon(context: Context, row: TrashRowData): Bitmap? {
-    if (!isApkTrashFile(row.name, row.mimeType) || row.sizeBytes > MAX_APK_ICON_BYTES) return null
+/** APK row shortcut into [loadApkIconFor]. */
+internal fun loadApkIcon(context: Context, row: TrashRowData): Bitmap? = loadApkIconFor(
+    context,
+    name = row.name,
+    mimeType = row.mimeType,
+    sizeBytes = row.sizeBytes,
+    uri = row.systemEntry?.uri,
+    storedPath = row.appEntry?.storedPath ?: row.systemEntry?.path
+)
 
-    val storedPath = row.appEntry?.storedPath ?: row.systemEntry?.path
+/**
+ * Reads the app icon from an APK, or null when the archive is unreadable
+ * (e.g. another app's trash directory is mode 700) or too large.
+ *
+ * Files this app can read are used directly; content-URI only rows are copied
+ * to a temp file first (PackageManager needs a path), and the temp file is
+ * deleted as soon as the icon has been read.
+ */
+internal fun loadApkIconFor(
+    context: Context,
+    name: String,
+    mimeType: String,
+    sizeBytes: Long,
+    uri: Uri?,
+    storedPath: String?
+): Bitmap? {
+    if (!isApkTrashFile(name, mimeType) || sizeBytes > MAX_APK_ICON_BYTES) return null
+
     var tempCopied: File? = null
     val sourcePath = storedPath ?: run {
-        val uri: Uri = row.systemEntry?.uri ?: return null
-        val out = File(context.cacheDir, "apk-icon-${row.id.hashCode()}.apk")
+        if (uri == null) return null
+        val out = File(context.cacheDir, "apk-icon-${name.hashCode()}.apk")
         val ok = runCatching {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 java.io.FileOutputStream(out).use { output -> input.copyTo(output) }
