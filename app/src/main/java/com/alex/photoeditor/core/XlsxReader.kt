@@ -6,7 +6,10 @@ import java.util.zip.ZipFile
 import javax.xml.parsers.DocumentBuilderFactory
 
 data class XlsxSheet(val name: String, val rows: List<List<String>>)
-data class XlsxDocument(val sheets: List<XlsxSheet>)
+data class XlsxDocument(
+    val sheets: List<XlsxSheet>,
+    val error: String? = null
+)
 
 /**
  * Minimal read-only XLSX reader. XLSX is a ZIP of XML parts, both supported by
@@ -19,83 +22,124 @@ object XlsxReader {
     private const val MAX_SHEETS = 8
     private const val MAX_ROWS = 200
     private const val MAX_COLS = 30
-    private const val REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
-    fun read(path: String): XlsxDocument? = runCatching {
+    fun read(path: String): XlsxDocument = runCatching {
         ZipFile(path).use { zip ->
             fun entry(name: String): String? = zip.getEntry(name)?.let { e ->
                 zip.getInputStream(e).bufferedReader(Charsets.UTF_8).use { it.readText() }
             }
 
-            val shared = parse(entry("xl/sharedStrings.xml").orEmpty())
-                ?.getElementsByTagName("si")
-                ?.let { nodes -> (0 until nodes.length).map { nodes.item(it).textContent.orEmpty() } }
-                ?: emptyList()
+            val shared = elementsNamed(parse(entry("xl/sharedStrings.xml").orEmpty()), "si")
+                .map { it.textContent.orEmpty() }
 
-            val rels = parse(entry("xl/_rels/workbook.xml.rels").orEmpty())
-                ?.getElementsByTagName("Relationship")
-                ?.let { nodes ->
-                    (0 until nodes.length).mapNotNull { i ->
-                        val node = nodes.item(i)
-                        val id = node.attributes?.getNamedItem("Id")?.nodeValue ?: return@mapNotNull null
-                        val target = node.attributes?.getNamedItem("Target")?.nodeValue
-                            ?: return@mapNotNull null
+            val rels = elementsNamed(parse(entry("xl/_rels/workbook.xml.rels").orEmpty()), "Relationship")
+                .mapNotNull { node ->
+                    val id = node.attributes?.getNamedItem("Id")?.nodeValue ?: return@mapNotNull null
+                    val target = node.attributes?.getNamedItem("Target")?.nodeValue
+                        ?: return@mapNotNull null
+                    if (target.contains("worksheet", ignoreCase = true)) {
                         val resolved = when {
                             target.startsWith("/") -> target.removePrefix("/")
                             target.startsWith("xl/") -> target
                             else -> "xl/$target"
                         }
                         id to resolved
-                    }.toMap()
-                } ?: emptyMap()
+                    } else null
+                }.toMap()
 
             val workbook = parse(entry("xl/workbook.xml").orEmpty())
-                ?: return@use null
-            val sheetNodes = workbook.getElementsByTagName("sheet")
-            val sheets = (0 until minOf(sheetNodes.length, MAX_SHEETS)).mapNotNull { i ->
-                val node = sheetNodes.item(i)
-                val name = node.attributes?.getNamedItem("name")?.nodeValue ?: "Sheet ${i + 1}"
-                val id = node.attributes?.getNamedItemNS(REL_NS, "id")?.nodeValue
-                    ?: node.attributes?.getNamedItem("r:id")?.nodeValue
-                val part = id?.let { rels[it] } ?: return@mapNotNull null
-                val xml = entry(part) ?: return@mapNotNull null
-                XlsxSheet(name, parseSheet(xml, shared))
+            var sheets = emptyList<XlsxSheet>()
+            if (workbook != null) {
+                val sheetNodes = elementsNamed(workbook, "sheet")
+                sheets = (0 until minOf(sheetNodes.size, MAX_SHEETS)).mapNotNull { i ->
+                    val node = sheetNodes[i]
+                    val name = node.attributes?.getNamedItem("name")?.nodeValue ?: "Sheet ${i + 1}"
+                    val id = (0 until (node.attributes?.length ?: 0)).mapNotNull { a ->
+                        val attr = node.attributes?.item(a) ?: return@mapNotNull null
+                        if (attr.localName == "id" || attr.nodeName.endsWith(":id")) {
+                            attr.nodeValue
+                        } else null
+                    }.firstOrNull()
+                    val part = id?.let { rels[it] } ?: "xl/worksheets/sheet${i + 1}.xml"
+                    val xml = entry(part) ?: return@mapNotNull null
+                    XlsxSheet(name, parseSheet(xml, shared))
+                }
             }
-            XlsxDocument(sheets)
+            if (sheets.isEmpty()) {
+                // Fallback for workbooks whose rels/workbook parts are unusual:
+                // try the conventional sheet paths directly.
+                sheets = (1..MAX_SHEETS).mapNotNull { i ->
+                    val xml = entry("xl/worksheets/sheet$i.xml") ?: return@mapNotNull null
+                    XlsxSheet("Sheet $i", parseSheet(xml, shared))
+                }
+            }
+            if (sheets.isEmpty()) {
+                XlsxDocument(emptyList(), "This XLSX has no readable sheets.")
+            } else {
+                XlsxDocument(sheets)
+            }
         }
-    }.getOrNull()
+    }.getOrElse { error ->
+        XlsxDocument(emptyList(), error.message ?: "Could not read this XLSX file.")
+    }
+
+    /** Matches elements by local name, with or without an XML namespace prefix. */
+    private fun elementsNamed(node: org.w3c.dom.Node?, name: String): List<org.w3c.dom.Node> {
+        if (node == null) return emptyList()
+        fun local(n: org.w3c.dom.Node): String =
+            n.localName ?: n.nodeName.substringAfterLast(':')
+        fun collect(n: org.w3c.dom.Node, out: ArrayList<org.w3c.dom.Node>) {
+            val children = n.childNodes ?: return
+            for (i in 0 until children.length) {
+                val child = children.item(i)
+                if (child.nodeType == org.w3c.dom.Node.ELEMENT_NODE) {
+                    if (local(child).equals(name, ignoreCase = true)) out.add(child)
+                    collect(child, out)
+                }
+            }
+        }
+        val result = ArrayList<org.w3c.dom.Node>()
+        collect(node, result)
+        return result
+    }
+
+    private fun textOf(cell: org.w3c.dom.Node, tag: String): String =
+        elementsNamed(cell, tag).joinToString("") { it.textContent.orEmpty() }.trim()
 
     private fun parseSheet(xml: String, shared: List<String>): List<List<String>> {
         val doc = parse(xml) ?: return emptyList()
-        val rows = doc.getElementsByTagName("row")
-        return (0 until minOf(rows.length, MAX_ROWS)).map { i ->
+        val rows = elementsNamed(doc, "row")
+        val result = (0 until minOf(rows.size, MAX_ROWS)).map { i ->
             val cells = MutableList(MAX_COLS) { "" }
-            val row = rows.item(i)
-            val cellNodes = row.childNodes
-            for (j in 0 until cellNodes.length) {
-                val cell = cellNodes.item(j)
-                if (cell.nodeName != "c") continue
+            elementsNamed(rows[i], "c").forEach { cell ->
                 val ref = cell.attributes?.getNamedItem("r")?.nodeValue.orEmpty()
-                val col = columnIndex(ref) ?: continue
-                if (col >= MAX_COLS) continue
+                val col = columnIndex(ref) ?: return@forEach
+                if (col >= MAX_COLS) return@forEach
                 val type = cell.attributes?.getNamedItem("t")?.nodeValue.orEmpty()
                 val raw = textOf(cell, "v")
                 cells[col] = when (type) {
                     "s" -> raw.toIntOrNull()?.let { shared.getOrNull(it) }.orEmpty()
-                    "inlineStr" -> textOf(cell, "is")
+                    "inlineStr" -> textOf(cell, "is") + textOf(cell, "t")
                     "b" -> if (raw == "1") "TRUE" else "FALSE"
+                    "str" -> raw
                     "e" -> raw
                     else -> raw
                 }
             }
             cells
         }
-    }
+        if (result.any { row -> row.any { it.isNotBlank() } }) return result
 
-    private fun textOf(cell: org.w3c.dom.Node, tag: String): String {
-        val nodes = (cell as? org.w3c.dom.Element)?.getElementsByTagName(tag)
-            ?: return ""
-        return (0 until nodes.length).joinToString("") { nodes.item(it).textContent.orEmpty() }.trim()
+        // Fallback for sheets whose cells use an unexpected structure: lay the
+        // raw <t>/<v> values out sequentially so their content is visible.
+        val values = (elementsNamed(doc, "t") + elementsNamed(doc, "v"))
+            .map { it.textContent.orEmpty() }
+            .filter { it.isNotBlank() }
+            .take(MAX_ROWS * MAX_COLS)
+        if (values.isEmpty()) return result
+        return values.chunked(MAX_COLS).take(MAX_ROWS).map { chunk ->
+            (chunk + List(MAX_COLS - chunk.size) { "" }).toMutableList()
+        }
     }
 
     private fun columnIndex(ref: String): Int? {
@@ -110,9 +154,15 @@ object XlsxReader {
         if (xml.isBlank()) return null
         return runCatching {
             val factory = DocumentBuilderFactory.newInstance()
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-            factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
-            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+            runCatching {
+                factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+            }
+            runCatching {
+                factory.setFeature("http://xml.org/sax/features/external-general-entities", false)
+            }
+            runCatching {
+                factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false)
+            }
             factory.isXIncludeAware = false
             factory.isExpandEntityReferences = false
             factory.newDocumentBuilder().parse(InputSource(StringReader(xml)))
