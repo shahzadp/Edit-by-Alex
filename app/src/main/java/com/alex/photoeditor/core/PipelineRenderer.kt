@@ -51,6 +51,13 @@ class PipelineRenderer(
     private var scratch: IntArray = IntArray(0)
 
     /**
+     * Holds the pre-filter pixels while a filter is applied, so its strength
+     * can be blended like Photoshop's filter opacity instead of scaling each
+     * individual effect parameter (which changes the *character* of a look).
+     */
+    private var filterScratch: IntArray = IntArray(0)
+
+    /**
      * Separate buffer for the cutout pass.
      *
      * The cutout resolves into its own bitmap before the layers are stacked,
@@ -176,9 +183,33 @@ class PipelineRenderer(
 
             // Colour stages run in place, in a fixed order so results are
             // deterministic: filter -> colour grade -> tonal adjustments.
+            val strength = state.filterStrength.coerceIn(0f, 1f)
             FilterLibrary.byId[state.filterId]?.let { filter ->
                 if (filter.id != "original") {
+                    if (strength < 1f) {
+                        if (filterScratch.size < needed) filterScratch = IntArray(needed)
+                        System.arraycopy(px, 0, filterScratch, 0, needed)
+                    }
                     filterEngine.applyToPixels(px, img.width, img.height, filter)
+                    if (strength < 1f) {
+                        // Blend the filtered result back over the untouched
+                        // pixels. This is the same as dialling a filter's
+                        // opacity in Photoshop: the look stays identical, it
+                        // just fades in.
+                        val inv = 1f - strength
+                        val orig = filterScratch
+                        for (j in 0 until needed) {
+                            val o = orig[j]
+                            val f = px[j]
+                            val r = ((o shr 16) and 0xFF) * inv + ((f shr 16) and 0xFF) * strength
+                            val g = ((o shr 8) and 0xFF) * inv + ((f shr 8) and 0xFF) * strength
+                            val b = (o and 0xFF) * inv + (f and 0xFF) * strength
+                            px[j] = (f and (0xFF shl 24)) or
+                                (r.roundToInt() shl 16) or
+                                (g.roundToInt() shl 8) or
+                                b.roundToInt()
+                        }
+                    }
                 }
             }
             if (!state.colorGrade.isNeutral) {

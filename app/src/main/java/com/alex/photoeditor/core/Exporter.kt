@@ -60,6 +60,46 @@ class Exporter(private val context: Context) {
         }
     }
 
+    /**
+     * Overwrites the photo at [uri] in place ("Save Over").
+     *
+     * The caller is responsible for choosing a format that matches the source
+     * file — writing JPEG bytes into a `.png` path would leave a corrupt file.
+     */
+    suspend fun saveOver(
+        uri: Uri,
+        bitmap: Bitmap,
+        settings: ExportSettings
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
+            if (uri.scheme == "file") {
+                val path = uri.path ?: return@withContext false
+                FileOutputStream(File(path)).use { compress(bitmap, settings, it) }
+                // Legacy file paths need an explicit media scan; a content://
+                // MediaStore row is updated in place by openOutputStream.
+                runCatching {
+                    context.sendBroadcast(Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
+                }
+                true
+            } else {
+                val out = context.contentResolver.openOutputStream(uri, "wt")
+                    ?: return@withContext false
+                out.use { compress(bitmap, settings, it) }
+                // If the source was HEIC (or any type we re-encode), keep the
+                // MediaStore MIME column in sync with the bytes now in the file.
+                if (uri.authority == "media") {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.MIME_TYPE, settings.format.mimeType)
+                    }
+                    runCatching { context.contentResolver.update(uri, values, null, null) }
+                }
+                true
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     /** Writes a full-quality copy into app-private storage (for "backup"). */
     suspend fun saveToAppStorage(bitmap: Bitmap, settings: ExportSettings): File? =
         withContext(Dispatchers.IO) {

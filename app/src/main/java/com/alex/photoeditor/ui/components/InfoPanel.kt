@@ -42,7 +42,11 @@ fun InfoPanel(info: ImageInfo?) {
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp, vertical = 12.dp)
     ) {
-        Text("Image", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Image",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
         Spacer(Modifier.height(6.dp))
         InfoRow("Name", info.displayName)
         InfoRow("Dimensions", "${info.widthPx} x ${info.heightPx} px")
@@ -59,7 +63,11 @@ fun InfoPanel(info: ImageInfo?) {
 
         if (info.cameraMake != null || info.cameraModel != null) {
             Spacer(Modifier.height(10.dp))
-            Text("Camera", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Camera",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
             Spacer(Modifier.height(6.dp))
             info.cameraMake?.let { InfoRow("Make", it) }
             info.cameraModel?.let { InfoRow("Model", it) }
@@ -67,13 +75,21 @@ fun InfoPanel(info: ImageInfo?) {
 
         if (info.dateTaken != null) {
             Spacer(Modifier.height(10.dp))
-            Text("Capture", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Capture",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
             Spacer(Modifier.height(6.dp))
             InfoRow("Date", info.dateTaken!!)
         }
 
         Spacer(Modifier.height(10.dp))
-        Text("Location", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Location",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.primary
+        )
         Spacer(Modifier.height(6.dp))
         if (info.gpsPresent && info.gpsLat != null && info.gpsLon != null) {
             InfoRow(

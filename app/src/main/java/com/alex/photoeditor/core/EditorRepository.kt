@@ -317,6 +317,22 @@ class EditorRepository(
      */
     private var sourceFile: File? = null
 
+    /**
+     * The gallery/media URI this session started from. Persisted into the
+     * project so "Save Over" can still reach the real file much later, even
+     * if the project was only saved on a second or third visit.
+     */
+    private var sourceUriString: String? = null
+
+    /** Set after a flatten so autosave never deletes the now-pristine project. */
+    private var keepPristineProject = false
+
+    /** The writable backing file, when the open image has one. */
+    fun currentSourceFile(): java.io.File? = sourceFile
+
+    /** The original media URI, carried across autosaves and project reopens. */
+    fun currentSourceUri(): String? = sourceUriString
+
     /** Id of the project this session is writing to, once one exists. */
     @Volatile
     var projectId: String? = null
@@ -342,6 +358,8 @@ class EditorRepository(
             // ImageLoader already imported a private copy, so that file is
             // the one a project should point at.
             sourceFile = loaded.sourceFile
+            sourceUriString = uri.toString()
+            keepPristineProject = false
             current = EditState()
             undoStack.clear()
             redoStack.clear()
@@ -395,6 +413,8 @@ class EditorRepository(
         cropCanvasKey = null
         cropCanvas = null
         sourceFile = null
+        sourceUriString = null
+        keepPristineProject = false
         projectId = null
 
         if (wasOpen) {
@@ -883,6 +903,32 @@ class EditorRepository(
 
     fun setFilter(id: String) = update({ it.copy(filterId = id) }, "Filter")
 
+    private var strengthGestureStart: EditState? = null
+
+    /** One drag of the filter-strength slider becomes one undo step. */
+    fun beginFilterStrengthGesture() {
+        if (strengthGestureStart == null) strengthGestureStart = current
+    }
+
+    fun updateFilterStrengthLive(v: Float) {
+        val base = strengthGestureStart ?: current
+        val next = base.copy(filterStrength = v.coerceIn(0f, 1f))
+        if (next == current) return
+        current = next
+        markChanged()
+        scheduleRender()
+    }
+
+    fun endFilterStrengthGesture() {
+        val start = strengthGestureStart ?: return
+        strengthGestureStart = null
+        if (start.filterStrength != current.filterStrength) {
+            undoStack.addLast(HistoryEntry(start, "Filter strength"))
+            if (undoStack.size > MAX_HISTORY) undoStack.removeFirst()
+            redoStack.clear()
+        }
+    }
+
     fun setFilterStrength(v: Float) = update(
         { it.copy(filterStrength = v.coerceIn(0f, 1f)) }, "Filter strength"
     )
@@ -1227,6 +1273,8 @@ class EditorRepository(
 
             original = loaded.bitmap
             sourceFile = file
+            sourceUriString = project.sourceUri
+            keepPristineProject = false
             current = project.state
             undoStack.clear()
             redoStack.clear()
@@ -1277,6 +1325,8 @@ class EditorRepository(
 
             original = loaded.bitmap
             sourceFile = file
+            sourceUriString = null
+            keepPristineProject = false
             current = EditState()
             undoStack.clear()
             redoStack.clear()
@@ -1303,6 +1353,38 @@ class EditorRepository(
     fun refresh() = scheduleRender()
 
     /**
+     * Flattens the rendered result into the project's source image and clears
+     * the edit stack. Without this, reopening the project would apply its old
+     * edits a second time to the already-edited file. The project record is
+     * kept, now pointing at the flattened file with a pristine state.
+     */
+    suspend fun flattenProjectSource(
+        context: android.content.Context,
+        bitmap: Bitmap
+    ) {
+        val file = sourceFile ?: return
+        val id = projectId ?: return
+        val previous = original
+        original = bitmap
+        current = EditState()
+        undoStack.clear()
+        redoStack.clear()
+        _preview.value = _preview.value.copy(original = bitmap)
+        keepPristineProject = true
+        // Written directly, and flagged so the next autosave (including the
+        // one fired when the editor closes) keeps the project instead of
+        // deleting it for being pristine.
+        ProjectStore.save(
+            context, id, file, projectName, current,
+            allowPristine = true,
+            sourceUri = sourceUriString
+        )
+        // With no edits, renderFull() hands back `original` itself — never
+        // recycle a bitmap the session still holds.
+        if (previous !== bitmap) previous?.recycle()
+    }
+
+    /**
      * Persists the current edit as a project.
      *
      * Called on a debounce after every state change, so a crash or an
@@ -1312,7 +1394,7 @@ class EditorRepository(
     suspend fun autosave(context: android.content.Context) {
         val file = sourceFile ?: return
         val state = current
-        if (state.isDefault) {
+        if (state.isDefault && !keepPristineProject) {
             // Back to a pristine image: the project has nothing to hold.
             projectId?.let { ProjectStore.delete(context, it) }
             projectId = null
@@ -1320,7 +1402,11 @@ class EditorRepository(
         }
 
         val preview = _preview.value.bitmap
-        val id = ProjectStore.save(context, projectId, file, projectName, state) ?: return
+        val id = ProjectStore.save(
+            context, projectId, file, projectName, state,
+            allowPristine = keepPristineProject,
+            sourceUri = sourceUriString
+        ) ?: return
         projectId = id
 
         // Thumbnail once the first render lands, not on every keystroke.

@@ -216,13 +216,25 @@ private fun prefs(context: Context) =
 fun GalleryScreen(
     onEditPhoto: (Uri) -> Unit,
     resumeViewerUri: Uri? = null,
-    onViewerResumeConsumed: () -> Unit = {}
+    onViewerResumeConsumed: () -> Unit = {},
+    startTab: GalleryTab? = null,
+    onStartTabConsumed: () -> Unit = {}
 ) {
     // Storage is gated for the whole app by AllFilesGate in MainActivity;
     // reaching this composable means access is already granted, and MediaStore
     // queries / file ops all just work.
     val context = LocalContext.current
     val vm: GalleryViewModel = viewModel()
+
+    // "Open photo" lands on a requested tab (Photos by default) instead of
+    // wherever the gallery was left. One-shot so switching tabs afterwards is
+    // never overridden by a recomposition.
+    LaunchedEffect(startTab) {
+        if (startTab != null) {
+            vm.selectTab(startTab)
+            onStartTabConsumed()
+        }
+    }
 
     // Sort order for folders. Recent is the default; Custom is the order the
     // user arranges by hand, persisted across launches.

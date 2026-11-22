@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -36,7 +37,9 @@ fun NamedActionIconButton(
     onClick: () -> Unit,
     enabled: Boolean = true,
     tint: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurface,
-    contentDescription: String = name
+    contentDescription: String = name,
+    /** Override in dense toolbars so the trailing action button is not clipped. */
+    size: Dp = 48.dp
 ) {
     val state = rememberTooltipState()
     TooltipBox(
@@ -47,9 +50,16 @@ fun NamedActionIconButton(
         IconButton(
             onClick = onClick,
             enabled = enabled,
-            modifier = Modifier.semantics { this.contentDescription = contentDescription }
+            modifier = Modifier
+                .size(size)
+                .semantics { this.contentDescription = contentDescription }
         ) {
-            Icon(icon, contentDescription = null, tint = tint)
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier.size(if (size <= 40.dp) 20.dp else 24.dp)
+            )
         }
     }
 }

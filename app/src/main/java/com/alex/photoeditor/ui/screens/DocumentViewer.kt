@@ -88,9 +88,6 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.alex.photoeditor.core.MediaItem
-import com.alex.photoeditor.core.MediaStoreRepository
-import com.alex.photoeditor.core.XlsxDocument
-import com.alex.photoeditor.core.XlsxReader
 import com.alex.photoeditor.ui.components.NamedActionIconButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -706,76 +703,6 @@ private fun ToolButton(name: String, icon: ImageVector, tint: Color, onClick: ()
     ) {
         IconButton(onClick = onClick, modifier = Modifier.size(38.dp)) {
             Icon(icon, contentDescription = name, tint = tint, modifier = Modifier.size(20.dp))
-        }
-    }
-}
-
-@Composable
-private fun XlsxView(item: MediaItem) {
-    val context = LocalContext.current
-    val doc by produceState<XlsxDocument?>(initialValue = null, item.uri) {
-        value = withContext(Dispatchers.IO) {
-            val path = item.absolutePath
-                ?: MediaStoreRepository.filePathFor(context, item)
-                ?: return@withContext XlsxDocument(emptyList(), "Could not locate the file on storage.")
-            XlsxReader.read(path)
-        }
-    }
-    var sheetIndex by remember(item.uri) { mutableStateOf(0) }
-    val document = doc
-    when {
-        document == null -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
-        }
-        document.sheets.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text(document.error ?: "This spreadsheet could not be opened.",
-                color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center,
-                modifier = Modifier.padding(24.dp))
-        }
-        else -> {
-            val sheet = document.sheets[sheetIndex.coerceIn(document.sheets.indices)]
-            Column(modifier = Modifier.fillMaxSize().padding(top = 16.dp)) {
-                Text(
-                    "Sheets: ${document.sheets.size} · Rows: ${sheet.rows.size} · ${item.name}",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(horizontal = 8.dp)
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 8.dp, vertical = 6.dp)
-                ) {
-                    document.sheets.forEachIndexed { index, s ->
-                        TextButton(onClick = { sheetIndex = index }, enabled = s.name != sheet.name) {
-                            Text(s.name)
-                        }
-                    }
-                }
-                Box(modifier = Modifier.weight(1f).fillMaxWidth().horizontalScroll(rememberScrollState())) {
-                    Column(modifier = Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 4.dp)) {
-                        sheet.rows.forEachIndexed { rowIndex, row ->
-                            Row {
-                                row.forEach { value ->
-                                    Box(
-                                        modifier = Modifier.width(112.dp).height(34.dp)
-                                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(4.dp))
-                                            .border(0.5.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                                            .background(
-                                                if (rowIndex == 0) MaterialTheme.colorScheme.secondaryContainer
-                                                else MaterialTheme.colorScheme.surface
-                                            ).padding(horizontal = 6.dp, vertical = 6.dp),
-                                        contentAlignment = Alignment.CenterStart
-                                    ) {
-                                        Text(value, style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurface, maxLines = 1,
-                                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }

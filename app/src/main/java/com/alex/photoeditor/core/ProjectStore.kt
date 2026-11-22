@@ -23,6 +23,13 @@ data class Project(
     val id: String = UUID.randomUUID().toString(),
     /** App-private copy of the source image. */
     val sourcePath: String,
+    /**
+     * The real media file this project came from, kept so "Save Over" can
+     * still find it on a later launch even when the project itself was only
+     * saved on the second or third visit. Null for blank canvases / older
+     * projects, in which case only the private copy is overwritten.
+     */
+    val sourceUri: String? = null,
     val displayName: String = "Untitled",
     val state: EditState = EditState(),
     /** Wall-clock milliseconds, written on every save. */
@@ -86,11 +93,15 @@ object ProjectStore {
         id: String?,
         sourceFile: File,
         displayName: String,
-        state: EditState
+        state: EditState,
+        /** A flattened project is pristine but must still be kept. */
+        allowPristine: Boolean = false,
+        /** Durable path back to the gallery photo, when there is one. */
+        sourceUri: String? = null
     ): String? = withContext(Dispatchers.IO) {
         // A project with no edits at all is just a copy of the original, which
         // the user already has. Keeping it would only clutter the grid.
-        if (state.isDefault) {
+        if (state.isDefault && !allowPristine) {
             if (id != null) delete(context, id)
             return@withContext null
         }
@@ -101,6 +112,7 @@ object ProjectStore {
         val record = Project(
             id = projectId,
             sourcePath = sourceFile.absolutePath,
+            sourceUri = sourceUri,
             displayName = displayName,
             state = state,
             modifiedAt = System.currentTimeMillis(),

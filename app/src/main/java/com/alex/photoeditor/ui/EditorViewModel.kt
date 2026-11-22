@@ -1,13 +1,21 @@
 package com.alex.photoeditor.ui
 
 import android.app.Application
+import android.content.ContentUris
 import android.graphics.Bitmap
 import android.net.Uri
+import android.provider.MediaStore
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.alex.photoeditor.core.ColorGrade
+import com.alex.photoeditor.core.CurveChannel
+import com.alex.photoeditor.core.HslAdjustments
+import com.alex.photoeditor.core.Levels
+import com.alex.photoeditor.core.SelectiveColor
+import com.alex.photoeditor.core.SelectiveRange
 import com.alex.photoeditor.core.Adjustments
 import com.alex.photoeditor.core.AdjustmentKind
 import com.alex.photoeditor.core.AspectPreset
@@ -44,6 +52,7 @@ import kotlin.math.roundToInt
 /** Which tool panel is showing. */
 enum class EditorTool(val label: String) {
     ADJUST("Adjust"),
+    COLOR("Colour"),
     FILTERS("Filters"),
     CROP("Crop"),
     TRANSFORM("Transform"),
@@ -71,6 +80,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     val repository = EditorRepository(
         cutoutComposer = CutoutComposer(TapSelectEngine(app))
     )
+
+    /**
+     * Compose-observable mirror of the repository's colour grade. The
+     * repository field itself is a plain var, so reading it directly from a
+     * composable never triggers recomposition — sliders then snapped back to
+     * an old value and the selective-colour switch refused to turn on.
+     */
+    var colorGrade by mutableStateOf(repository.currentColorGrade())
+        private set
+
+    private fun syncColorGrade() {
+        colorGrade = repository.currentColorGrade()
+    }
     private val exporter = Exporter(app)
 
     init {
@@ -103,7 +125,34 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     var activeAdjustment by mutableStateOf(AdjustmentKind.EXPOSURE)
         private set
 
+    /** Which colour panel is showing: 0 levels, 1 HSL, 2 selective. */
+    var activeColorTab by mutableStateOf(0)
+        private set
+
+    fun selectColorTab(tab: Int) {
+        activeColorTab = tab.coerceIn(0, 2)
+    }
+
+    var activeColorChannel by mutableStateOf(CurveChannel.RED)
+        private set
+
+    fun selectColorChannel(channel: CurveChannel) {
+        activeColorChannel = channel
+    }
+
+    /** Which of Photoshop's nine Selective Color ranges is showing. */
+    var activeSelectiveRange by mutableStateOf(SelectiveRange.REDS)
+        private set
+
+    fun selectSelectiveRange(range: SelectiveRange) {
+        activeSelectiveRange = range
+    }
+
     var activeFilterId by mutableStateOf("original")
+        private set
+
+    /** Compose-observable mirror of the repository's filter strength. */
+    var filterStrength by mutableStateOf(1f)
         private set
 
     var showExportSheet by mutableStateOf(false)
@@ -151,6 +200,19 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun openGallery() {
         showGallery = true
+    }
+
+    /** Opens our own gallery and asks it to land on a specific tab. */
+    fun openGalleryAt(tab: GalleryTab) {
+        galleryStartTab = tab
+        showGallery = true
+    }
+
+    var galleryStartTab by mutableStateOf<GalleryTab?>(null)
+        private set
+
+    fun consumeGalleryStartTab() {
+        galleryStartTab = null
     }
 
     fun closeGallery() {
@@ -219,6 +281,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Stops a queued autosave from racing an in-place file overwrite. */
+    private fun cancelPendingAutosave() {
+        autosaveJob?.cancel()
+        autosaveJob = null
+    }
+
     private suspend fun refreshProjects() {
         isLoadingProjects = true
         projects = ProjectStore.list(getApplication())
@@ -248,6 +316,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             }
             showProjects = false
             repository.openProject(getApplication(), project)
+            syncFilterState()
+            syncColorGrade()
         }
     }
 
@@ -490,7 +560,11 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         showGallery = false
         returnToGalleryAfterClose = returnToGallery
         resumeViewerUri = if (returnToGallery) uri else null
-        viewModelScope.launch { repository.open(getApplication(), uri) }
+        viewModelScope.launch {
+            repository.open(getApplication(), uri)
+            syncFilterState()
+            syncColorGrade()
+        }
     }
 
     /** Clears the one-shot viewer-resume signal consumed by the gallery. */
@@ -510,6 +584,8 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         // last few seconds of edits are lost.
         flushAutosave()
         repository.close()
+        syncFilterState()
+        syncColorGrade()
         // If the user came from the gallery, go back to it rather than to the
         // editor's empty state — the gallery is a separate destination, not
         // a hidden route inside the editor.
@@ -551,6 +627,26 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         repository.setFilter(id)
     }
 
+    fun beginFilterStrengthEdit() = repository.beginFilterStrengthGesture()
+
+    fun onFilterStrengthChange(v: Float) {
+        val value = v.coerceIn(0f, 1f)
+        repository.updateFilterStrengthLive(value)
+        filterStrength = value
+    }
+
+    fun endFilterStrengthEdit() {
+        repository.endFilterStrengthGesture()
+        syncFilterState()
+    }
+
+    /** Re-reads filter fields after anything that can replace the edit state. */
+    fun syncFilterState() {
+        val s = repository.currentState()
+        activeFilterId = s.filterId
+        filterStrength = s.filterStrength
+    }
+
     fun onSliderChange(kind: AdjustmentKind, value: Float) {
         repository.setAdjustment(kind, value)
     }
@@ -561,7 +657,42 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
 
     fun resetAdjustments() = repository.resetAdjustments()
 
-    fun resetAll() = repository.resetAll()
+    fun resetAll() {
+        repository.resetAll()
+        syncFilterState()
+        syncColorGrade()
+    }
+
+    // ------------------------------------------------------- colour grading
+
+    fun currentColorGrade(): ColorGrade = colorGrade
+
+    fun beginColorEdit(label: String) = repository.beginColorGesture(label)
+
+    fun endColorEdit() {
+        repository.endColorGesture()
+        syncColorGrade()
+    }
+
+    fun onLevelsChange(channel: CurveChannel, levels: Levels) {
+        repository.updateLevelsLive(channel, levels)
+        syncColorGrade()
+    }
+
+    fun onHslChange(adj: HslAdjustments) {
+        repository.updateHslLive(adj)
+        syncColorGrade()
+    }
+
+    fun onSelectiveChange(sc: SelectiveColor) {
+        repository.updateSelectiveColorLive(sc)
+        syncColorGrade()
+    }
+
+    fun resetColorGrade() {
+        repository.resetColorGrade()
+        syncColorGrade()
+    }
 
     /** Press-and-hold compare against the untouched original. */
     fun toggleComparing(held: Boolean) {
@@ -686,8 +817,17 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
         } ?: AspectPreset.FREE
     }
 
-    fun undo() = repository.undo()
-    fun redo() = repository.redo()
+    fun undo() {
+        repository.undo()
+        syncFilterState()
+        syncColorGrade()
+    }
+
+    fun redo() {
+        repository.redo()
+        syncFilterState()
+        syncColorGrade()
+    }
 
     // ---------------------------------------------------------- cutout taps
 
@@ -816,6 +956,123 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
             } else {
                 "Could not write the file"
             }
+        }
+    }
+
+    /**
+     * Legacy projects were saved before we recorded the media URI. If the
+     * display name is a real filename and matches exactly one gallery image,
+     * that is a safe way back to the original file. Ambiguity means we do not
+     * guess — overwriting the wrong photo would be much worse.
+     */
+    private fun findMediaUriByName(name: String?): Uri? {
+        if (name == null || !name.contains('.')) return null
+        val cursor = getApplication<Application>().contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            arrayOf(MediaStore.Images.Media._ID),
+            "${MediaStore.Images.Media.DISPLAY_NAME} = ?",
+            arrayOf(name),
+            null
+        ) ?: return null
+        return cursor.use {
+            if (it.count != 1 || !it.moveToFirst()) return@use null
+            val id = it.getLong(it.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
+            ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+        }
+    }
+
+    /** Matches the source file's format so an overwrite never changes its type. */
+    private fun sourceFormat(): ExportFormat {
+        val name = preview.value.info?.displayName.orEmpty()
+        val mime = preview.value.info?.mimeType.orEmpty()
+        return when {
+            name.endsWith(".png", true) || mime == "image/png" -> ExportFormat.PNG
+            name.endsWith(".webp", true) || mime == "image/webp" -> ExportFormat.WEBP
+            else -> ExportFormat.JPEG
+        }
+    }
+
+    /**
+     * Saves the edit back into its source: the image file for a photo, or the
+     * saved project for one opened from Projects.
+     */
+    fun saveOver() {
+        if (isExporting) return
+
+        // A saved project has two files: its app-private copy (what a reopened
+        // project loads) and the real gallery photo it came from. Overwrite
+        // both, then flatten the session so the old edits are not re-applied.
+        if (repository.projectId != null) {
+            val projectFile = repository.currentSourceFile()
+            if (projectFile == null) {
+                statusMessage = "This project has no source file to overwrite"
+                return
+            }
+            // Recorded when the photo was first opened, then carried through
+            // every autosave — so it is still there on a later visit.
+            val mediaUri = repository.currentSourceUri()?.let { raw ->
+                runCatching { Uri.parse(raw) }.getOrNull()
+            } ?: findMediaUriByName(preview.value.info?.displayName)
+            cancelPendingAutosave()
+            viewModelScope.launch {
+                isExporting = true
+                val bitmap = repository.renderForExport()
+                if (bitmap == null) {
+                    statusMessage = "Nothing to save"
+                    isExporting = false
+                    return@launch
+                }
+                val settings = ExportSettings(
+                    format = sourceFormat(),
+                    quality = exportQuality,
+                    fileName = projectFile.nameWithoutExtension
+                )
+
+                // The private copy must always be written: it is the source a
+                // reopened project actually loads.
+                val copyOk = exporter.saveOver(Uri.fromFile(projectFile), bitmap, settings)
+                val mediaOk = mediaUri?.let { exporter.saveOver(it, bitmap, settings) } == true
+
+                if (copyOk) {
+                    repository.flattenProjectSource(getApplication(), bitmap)
+                    syncFilterState()
+                    syncColorGrade()
+                    statusMessage = if (mediaOk) {
+                        "Saved over original"
+                    } else {
+                        "Saved over project copy — original path unknown"
+                    }
+                } else {
+                    statusMessage = "Could not overwrite the source file"
+                }
+                isExporting = false
+            }
+            return
+        }
+
+        val uri = preview.value.sourceUri
+            ?: repository.currentSourceFile()?.let { Uri.fromFile(it) }
+        if (uri == null) {
+            statusMessage = "This photo has no file to overwrite — use Save as Copy"
+            return
+        }
+        viewModelScope.launch {
+            isExporting = true
+            val bitmap = repository.renderForExport()
+            if (bitmap == null) {
+                statusMessage = "Nothing to save"
+                isExporting = false
+                return@launch
+            }
+            val settings = ExportSettings(
+                format = sourceFormat(),
+                quality = exportQuality,
+                fileName = preview.value.info?.displayName?.substringBeforeLast('.')
+            )
+            val ok = exporter.saveOver(uri, bitmap, settings)
+            isExporting = false
+            showExportSheet = false
+            statusMessage = if (ok) "Saved over original" else "Could not overwrite the original"
         }
     }
 

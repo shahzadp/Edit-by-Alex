@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.Filter
@@ -165,6 +166,7 @@ fun ToolRail(
 /** Icon for each tool, kept in one place so the order stays readable. */
 private fun iconFor(tool: EditorTool) = when (tool) {
     EditorTool.ADJUST -> Icons.Filled.Tune
+    EditorTool.COLOR -> Icons.Filled.ColorLens
     EditorTool.FILTERS -> Icons.Filled.Filter
     EditorTool.CROP -> Icons.Filled.Crop
     EditorTool.TRANSFORM -> Icons.Filled.TurnSlightRight

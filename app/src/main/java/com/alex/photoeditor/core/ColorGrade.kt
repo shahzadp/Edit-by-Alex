@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
+import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.roundToInt
 
@@ -187,21 +188,78 @@ data class HslAdjustments(
         get() = hue == 0f && saturation == 0f && lightness == 0f
 }
 
+/** Photoshop's Relative / Absolute switch for Selective Color. */
+@Serializable
+enum class SelectiveMode { RELATIVE, ABSOLUTE }
+
+/** The nine colour ranges Photoshop's Selective Color can target. */
+enum class SelectiveRange(val label: String) {
+    REDS("Reds"), YELLOWS("Yellows"), GREENS("Greens"),
+    CYANS("Cyans"), BLUES("Blues"), MAGENTAS("Magentas"),
+    WHITES("Whites"), NEUTRALS("Neutrals"), BLACKS("Blacks")
+}
+
 /**
- * Selectively shifts hue, saturation and luminance within a colour range.
+ * Photoshop's "Selective Color", faithful to the algorithm Adobe uses (the
+ * one independently reverse-engineered and shipped as FFmpeg's
+ * `selectivecolor` filter).
  *
- * This is Photoshop's "Selective Color", implemented per RGB channel with a
- * tolerance falloff, which covers the majority of practical corrections.
+ * Each of the nine ranges holds CMYK offsets in [-1, 1]. Cyan / Magenta /
+ * Yellow drive the R / G / B components respectively and Black is the K
+ * offset. A pixel can belong to several ranges at once; their contributions
+ * are summed.
  */
 @Serializable
 data class SelectiveColor(
+    // The original three ranges keep their old names so saved projects from
+    // before the full Photoshop implementation still deserialise correctly.
     val red: RgbCorrection = RgbCorrection(),
+    val yellow: RgbCorrection = RgbCorrection(),
     val green: RgbCorrection = RgbCorrection(),
+    val cyan: RgbCorrection = RgbCorrection(),
     val blue: RgbCorrection = RgbCorrection(),
+    val magenta: RgbCorrection = RgbCorrection(),
+    val white: RgbCorrection = RgbCorrection(),
+    val neutral: RgbCorrection = RgbCorrection(),
+    val black: RgbCorrection = RgbCorrection(),
+    val mode: SelectiveMode = SelectiveMode.RELATIVE,
     val isEnabled: Boolean = false
-)
+) {
+    fun correctionFor(range: SelectiveRange): RgbCorrection = when (range) {
+        SelectiveRange.REDS -> red
+        SelectiveRange.YELLOWS -> yellow
+        SelectiveRange.GREENS -> green
+        SelectiveRange.CYANS -> cyan
+        SelectiveRange.BLUES -> blue
+        SelectiveRange.MAGENTAS -> magenta
+        SelectiveRange.WHITES -> white
+        SelectiveRange.NEUTRALS -> neutral
+        SelectiveRange.BLACKS -> black
+    }
 
-/** Per-RGB-channel correction. Values in [-1, 1]. */
+    fun withCorrection(range: SelectiveRange, corr: RgbCorrection): SelectiveColor = when (range) {
+        SelectiveRange.REDS -> copy(red = corr)
+        SelectiveRange.YELLOWS -> copy(yellow = corr)
+        SelectiveRange.GREENS -> copy(green = corr)
+        SelectiveRange.CYANS -> copy(cyan = corr)
+        SelectiveRange.BLUES -> copy(blue = corr)
+        SelectiveRange.MAGENTAS -> copy(magenta = corr)
+        SelectiveRange.WHITES -> copy(white = corr)
+        SelectiveRange.NEUTRALS -> copy(neutral = corr)
+        SelectiveRange.BLACKS -> copy(black = corr)
+    }
+
+    /** True when the adjustment would change no pixels. */
+    val isIdentity: Boolean
+        get() = red.isIdentity && yellow.isIdentity && green.isIdentity &&
+            cyan.isIdentity && blue.isIdentity && magenta.isIdentity &&
+            white.isIdentity && neutral.isIdentity && black.isIdentity
+
+    /** True only when enabled *and* actually carrying an adjustment. */
+    val isEffective: Boolean get() = isEnabled && !isIdentity
+}
+
+/** Per-range CMYK correction. Values in [-1, 1]. */
 @Serializable
 data class RgbCorrection(
     val cyan: Float = 0f,
@@ -230,7 +288,7 @@ data class ColorGrade(
         get() = curves.values.none { !it.isIdentity } &&
             levels.values.none { !it.isIdentity } &&
             hsl.isIdentity &&
-            !selectiveColor.isEnabled
+            !selectiveColor.isEffective
 }
 
 /**
@@ -407,47 +465,89 @@ class ColorGradeEngine {
 
     // ------------------------------------------------------ selective colour
 
+    /**
+     * Photoshop-faithful Selective Color: the algorithm Adobe uses, as
+     * independently reverse-engineered and shipped in FFmpeg's `selectivecolor`
+     * filter.
+     *
+     * For each pixel we find every colour range it belongs to (a pixel can be
+     * in several, e.g. a skin tone is both Reds and Yellows) and sum that
+     * range's per-channel adjustment. The adjustment for one channel is:
+     *
+     *   clip(((-1 - a) * k - a) * m, -v/N, 1 - v/N) * scale
+     *
+     * `a` is the slider value, `k` the black slider, `m` the relative/absolute
+     * factor, and `scale` the range-specific strength derived from the pixel's
+     * own min / median / max. Because the scale depends on the pixel, this is a
+     * true Photoshop-style selective adjustment rather than a global tint.
+     */
     private fun applySelectiveColor(px: IntArray, sc: SelectiveColor) {
+        val half = 127.5f // N / 2 for 8-bit channels
         for (i in px.indices) {
             val c = px[i]
-            var r = ((c shr 16) and 0xFF) * INV255
-            var g = ((c shr 8) and 0xFF) * INV255
-            var b = (c and 0xFF) * INV255
+            val r = ((c shr 16) and 0xFF).toFloat()
+            val g = ((c shr 8) and 0xFF).toFloat()
+            val b = (c and 0xFF).toFloat()
 
-            r = adjustChannel(r, g, b, sc.red)
-            g = adjustChannel(g, r, g, sc.green)
-            b = adjustChannel(b, r, g, sc.blue)
+            val mx = maxOf(r, g, b)
+            val mn = minOf(r, g, b)
+            val md = r + g + b - mx - mn
 
+            var dr = 0f
+            var dg = 0f
+            var db = 0f
+
+            // Adds one range's contribution to all three channels.
+            fun add(corr: RgbCorrection, scale: Float) {
+                if (corr.isIdentity || scale <= 0f) return
+                dr += phi(r, corr.cyan, corr.black, scale, sc.mode)
+                dg += phi(g, corr.magenta, corr.black, scale, sc.mode)
+                db += phi(b, corr.yellow, corr.black, scale, sc.mode)
+            }
+
+            // Primary (RGB) ranges: scale = max - median.
+            if (mx == r) add(sc.red, mx - md)
+            if (mx == g) add(sc.green, mx - md)
+            if (mx == b) add(sc.blue, mx - md)
+
+            // Secondary (CMY) ranges: scale = median - min.
+            if (mn == b) add(sc.yellow, md - mn)
+            if (mn == r) add(sc.cyan, md - mn)
+            if (mn == g) add(sc.magenta, md - mn)
+
+            // Tonal ranges.
+            if (r > half && g > half && b > half) {
+                add(sc.white, (mn - half) * 2f)
+            }
+            if ((r != 0f || g != 0f || b != 0f) &&
+                (r != 255f || g != 255f || b != 255f)
+            ) {
+                add(sc.neutral, 255f - (abs(mx - half) + abs(mn - half)))
+            }
+            if (r < half && g < half && b < half) {
+                add(sc.black, (half - mx) * 2f)
+            }
+
+            // r/g/b and the deltas are already in 8-bit units here, so they
+            // must NOT go through to255(), which expects a 0..1 float.
             px[i] = (c and OPAQUE) or
-                (to255(r) shl 16) or (to255(g) shl 8) or to255(b)
+                ((r + dr).roundToInt().coerceIn(0, 255) shl 16) or
+                ((g + dg).roundToInt().coerceIn(0, 255) shl 8) or
+                (b + db).roundToInt().coerceIn(0, 255)
         }
     }
 
-    /**
-     * Applies one channel's CMYK correction, weighted by how much the *other*
-     * two channels dominate. This is what makes red corrections affect reds and
-     * leave cyans largely alone.
-     */
-    private fun adjustChannel(target: Float, r: Float, g: Float, corr: RgbCorrection): Float {
-        if (corr.isIdentity) return target
-
-        val b = 1f - r - g
-        val weight = when {
-            target == r -> ((g + b) * 0.5f).coerceIn(0f, 1f)
-            target == g -> ((r + b) * 0.5f).coerceIn(0f, 1f)
-            else -> ((r + g) * 0.5f).coerceIn(0f, 1f)
-        }
-        if (weight <= 0.0001f) return target
-
-        // Cyan/magenta/yellow move each channel additively; black is a
-        // multiplicative density change.
-        var v = target
-        v += corr.cyan * 0.5f * weight
-        v += corr.magenta * 0.5f * weight * if (target == r || target == g) 0.5f else 1f
-        v += corr.yellow * 0.5f * weight * if (target == b) 1f else 0.25f
-        v += corr.black * 0.4f * weight
-
-        return v.coerceIn(0f, 1f)
+    /** One channel's Photoshop selective-colour adjustment, in 8-bit units. */
+    private fun phi(
+        v: Float,
+        a: Float,
+        k: Float,
+        scale: Float,
+        mode: SelectiveMode
+    ): Float {
+        val m = if (mode == SelectiveMode.RELATIVE) 1f - v * INV255 else 1f
+        val x = ((-1f - a) * k - a) * m
+        return x.coerceIn(-v * INV255, 1f - v * INV255) * scale
     }
 
     private fun to255(v: Float): Int = (v * 255f).roundToInt().coerceIn(0, 255)

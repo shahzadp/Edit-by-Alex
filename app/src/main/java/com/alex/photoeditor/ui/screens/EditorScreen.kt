@@ -23,15 +23,19 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Compare
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -42,7 +46,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -60,7 +66,9 @@ import com.alex.photoeditor.R
 import com.alex.photoeditor.ui.EditorTool
 import com.alex.photoeditor.ui.EditorViewModel
 import com.alex.photoeditor.ui.rememberSafeArea
+import com.alex.photoeditor.ui.GalleryTab
 import com.alex.photoeditor.ui.components.AdjustPanel
+import com.alex.photoeditor.ui.components.ColorPanel
 import com.alex.photoeditor.ui.components.CropStage
 import com.alex.photoeditor.ui.components.DrawGestureStage
 import com.alex.photoeditor.ui.components.DrawPanel
@@ -129,14 +137,16 @@ fun EditorScreen(
                     GalleryScreen(
                         onEditPhoto = { uri -> vm.openImage(uri, returnToGallery = true) },
                         resumeViewerUri = vm.resumeViewerUri,
-                        onViewerResumeConsumed = { vm.clearResumeViewerUri() }
+                        onViewerResumeConsumed = { vm.clearResumeViewerUri() },
+                        startTab = vm.galleryStartTab,
+                        onStartTabConsumed = { vm.consumeGalleryStartTab() }
                     )
                 } else {
                 Box(modifier = Modifier.fillMaxSize()) {
                     when {
                         state.error != null -> ErrorState(state.error!!, onPickImage)
                         state.bitmap == null -> EmptyState(
-                            onPickImage = onPickImage,
+                            onOpenGallery = { vm.openGalleryAt(GalleryTab.PHOTOS) },
                             onOpenProjects = vm::openProjects
                         )
                         else -> EditorContent(
@@ -334,6 +344,7 @@ private fun EditorContent(
             ) {
                 when (vm.activeTool) {
                     EditorTool.ADJUST -> AdjustPanel(vm)
+                    EditorTool.COLOR -> ColorPanel(vm)
                     EditorTool.FILTERS -> FilterPanel(vm)
                     EditorTool.CROP -> TransformPanel(vm, cropMode = true)
                     EditorTool.TRANSFORM -> TransformPanel(vm, cropMode = false)
@@ -423,85 +434,141 @@ private fun TopBar(
     state: com.alex.photoeditor.core.PreviewState
 ) {
     val comparing = vm.isComparing
+    var saveMenuOpen by remember { mutableStateOf(false) }
 
-    Row(
+    // The toolbar packs seven controls. On a narrow phone the old fixed-size
+    // row overflowed and clipped the trailing Save button into the corner, so
+    // we shrink the navigation cluster and drop the dimension label when the
+    // screen is too narrow to afford it.
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxWidth()
             .background(MaterialTheme.colorScheme.surface)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(4.dp)
     ) {
-        NamedActionIconButton(
-            name = "Back",
-            icon = Icons.AutoMirrored.Filled.ArrowBack,
-            onClick = { vm.closeImage() },
-            contentDescription = "Back"
-        )
-
-        NamedActionIconButton(
-            name = "Undo",
-            icon = Icons.AutoMirrored.Filled.Undo,
-            onClick = vm::undo,
-            enabled = state.canUndo,
-            contentDescription = "Undo"
-        )
-
-        NamedActionIconButton(
-            name = "Redo",
-            icon = Icons.AutoMirrored.Filled.Redo,
-            onClick = vm::redo,
-            enabled = state.canRedo,
-            contentDescription = "Redo"
-        )
-
-        // Hold to see the original. A filled tonal state while held makes the
-        // "you are looking at the unedited photo" moment unambiguous.
-        ExpressiveIconToggle(
-            icon = Icons.Filled.Compare,
-            contentDescription = "Hold to compare with original",
-            onClick = {},
-            selected = comparing,
-            tint = MaterialTheme.colorScheme.onSurface,
+        val roomy = maxWidth >= 400.dp
+        Row(
             modifier = Modifier
-                .size(44.dp)
-                .pressAndHold(
-                    onDown = { vm.toggleComparing(true) },
-                    onUp = { vm.toggleComparing(false) }
-                )
-        )
-
-        Spacer(Modifier.weight(1f))
-
-        state.info?.let {
-            Text(
-                text = "${it.widthPx}x${it.heightPx}",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(end = 8.dp)
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            NamedActionIconButton(
+                name = "Back",
+                icon = Icons.AutoMirrored.Filled.ArrowBack,
+                onClick = { vm.closeImage() },
+                contentDescription = "Back",
+                size = 40.dp
             )
+
+            NamedActionIconButton(
+                name = "Undo",
+                icon = Icons.AutoMirrored.Filled.Undo,
+                onClick = vm::undo,
+                enabled = state.canUndo,
+                contentDescription = "Undo",
+                size = 40.dp
+            )
+
+            NamedActionIconButton(
+                name = "Redo",
+                icon = Icons.AutoMirrored.Filled.Redo,
+                onClick = vm::redo,
+                enabled = state.canRedo,
+                contentDescription = "Redo",
+                size = 40.dp
+            )
+
+            // Hold to see the original. A filled tonal state while held makes
+            // the "you are looking at the unedited photo" moment unambiguous.
+            ExpressiveIconToggle(
+                icon = Icons.Filled.Compare,
+                contentDescription = "Hold to compare with original",
+                onClick = {},
+                selected = comparing,
+                tint = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier
+                    .size(40.dp)
+                    .pressAndHold(
+                        onDown = { vm.toggleComparing(true) },
+                        onUp = { vm.toggleComparing(false) }
+                    )
+            )
+
+            Spacer(Modifier.weight(1f))
+
+            if (roomy) {
+                state.info?.let {
+                    Text(
+                        text = "${it.widthPx}x${it.heightPx}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(end = 2.dp)
+                    )
+                }
+            }
+
+            NamedActionIconButton(
+                name = "Share",
+                icon = Icons.Filled.Share,
+                onClick = { vm.share() },
+                contentDescription = "Share",
+                size = 44.dp
+            )
+
+            // Full-size tonal button with a chevron badge so it reads as the
+            // equal of Share and clearly opens a choice rather than saving.
+            Box {
+                FilledTonalIconButton(
+                    onClick = { saveMenuOpen = true },
+                    modifier = Modifier
+                        .size(48.dp)
+                        .semantics { contentDescription = "Save options" }
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Filled.Save,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Icon(
+                            Icons.Filled.ArrowDropDown,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .size(13.dp)
+                                .align(Alignment.BottomEnd)
+                        )
+                    }
+                }
+                DropdownMenu(
+                    expanded = saveMenuOpen,
+                    onDismissRequest = { saveMenuOpen = false }
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Save Over") },
+                        onClick = {
+                            saveMenuOpen = false
+                            vm.saveOver()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Save as Copy") },
+                        onClick = {
+                            saveMenuOpen = false
+                            vm.openExportSheet()
+                        }
+                    )
+                }
+            }
         }
-
-        NamedActionIconButton(
-            name = "Share",
-            icon = Icons.Filled.Share,
-            onClick = { vm.share() },
-            contentDescription = "Share"
-        )
-
-        NamedActionIconButton(
-            name = "Save to gallery",
-            icon = Icons.Filled.Download,
-            onClick = vm::openExportSheet,
-            tint = MaterialTheme.colorScheme.primary,
-            contentDescription = "Save to gallery"
-        )
     }
 }
 
 @Composable
 private fun EmptyState(
-    onPickImage: () -> Unit,
+    onOpenGallery: () -> Unit,
     onOpenProjects: () -> Unit
 ) {
     Column(
@@ -539,8 +606,8 @@ private fun EmptyState(
         Spacer(Modifier.height(24.dp))
         ExpressiveButton(
             text = "Open photo",
-            icon = Icons.Filled.AddPhotoAlternate,
-            onClick = onPickImage
+            icon = Icons.Filled.PhotoLibrary,
+            onClick = onOpenGallery
         )
         Spacer(Modifier.height(10.dp))
         ExpressiveTonalButton(

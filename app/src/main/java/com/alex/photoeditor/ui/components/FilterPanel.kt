@@ -24,10 +24,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -48,6 +51,7 @@ import com.alex.photoeditor.core.PhotoFilter
 import com.alex.photoeditor.ui.EditorViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 /** Filter tool: category tabs with a grid of live-rendered previews. */
 @Composable
@@ -56,6 +60,12 @@ fun FilterPanel(vm: EditorViewModel) {
     var category by remember { mutableStateOf(FilterCategory.BASIC) }
     val filters = groups[category].orEmpty()
     val baseBitmap = vm.preview.value.original
+
+    // Local state keeps the thumb under the finger. The repository value only
+    // catches up after the async preview render, which made the slider lag.
+    var localStrength by remember { mutableFloatStateOf(vm.filterStrength) }
+    var draggingStrength by remember { mutableStateOf(false) }
+    if (!draggingStrength && localStrength != vm.filterStrength) localStrength = vm.filterStrength
 
     Column(
         modifier = Modifier
@@ -76,6 +86,46 @@ fun FilterPanel(vm: EditorViewModel) {
                     onClick = { category = cat }
                 )
             }
+        }
+
+        // Filter strength, like Photoshop's filter opacity: the look stays the
+        // same and simply fades in over the original image.
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Strength",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(Modifier.width(10.dp))
+            Slider(
+                value = localStrength,
+                onValueChange = { v ->
+                    draggingStrength = true
+                    localStrength = v
+                    if (vm.activeFilterId != "original") vm.beginFilterStrengthEdit()
+                    vm.onFilterStrengthChange(v)
+                },
+                onValueChangeFinished = {
+                    draggingStrength = false
+                    if (vm.activeFilterId != "original") vm.endFilterStrengthEdit()
+                },
+                valueRange = 0f..1f,
+                modifier = Modifier.weight(1f),
+                colors = SliderDefaults.colors(
+                    thumbColor = MaterialTheme.colorScheme.primary,
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                    inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                )
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "${(localStrength * 100).roundToInt()}%",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
         }
 
         val listState = rememberLazyListState()
