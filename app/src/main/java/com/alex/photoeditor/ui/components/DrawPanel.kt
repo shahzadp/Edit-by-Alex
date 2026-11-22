@@ -190,6 +190,42 @@ fun DrawPanel(
 
         Spacer(Modifier.height(4.dp))
 
+        // --- Opacity. Stored on each new stroke (and fill), so changing it
+        // affects what you draw next rather than repainting existing marks.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                "Opacity",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Slider(
+                value = vm.drawOpacity,
+                onValueChange = { vm.setBrushOpacity(it) },
+                // A fully transparent stroke is invisible (and excluded from
+                // the render), so keep a small usable floor.
+                valueRange = 0.05f..1f,
+                colors = SliderDefaults.colors(
+                    activeTrackColor = MaterialTheme.colorScheme.primary,
+                    inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                ),
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(start = 12.dp)
+            )
+            Text(
+                "${(vm.drawOpacity * 100).roundToInt()}%",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+
+        Spacer(Modifier.height(4.dp))
+
         // --- Colour + hex, then the wheel behind a toggle.
         Row(
             modifier = Modifier

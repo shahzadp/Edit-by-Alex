@@ -515,7 +515,12 @@ class EditorViewModel(app: Application) : AndroidViewModel(app) {
     /** Fills the region around a normalised point in image space. */
     fun fillAt(x: Float, y: Float) {
         repository.addFill(
-            DrawFill(id = java.util.UUID.randomUUID().toString(), x = x, y = y, color = drawColor)
+            DrawFill(
+                id = java.util.UUID.randomUUID().toString(),
+                x = x, y = y,
+                color = drawColor,
+                opacity = drawOpacity
+            )
         )
     }
 

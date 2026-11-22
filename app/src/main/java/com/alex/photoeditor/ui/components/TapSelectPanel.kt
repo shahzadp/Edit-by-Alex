@@ -70,7 +70,10 @@ fun TapSelectPanel(
 
         Spacer(Modifier.height(4.dp))
 
-        // Keep / remove and clear controls.
+        // Keep / remove, a passive readout of how many objects are in the
+        // selection, and Clear. The old "Add to selection" chip looked tappable
+        // but was disabled: adding was always handled by the tap gesture, so
+        // the count is shown as information rather than a dead control.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -83,11 +86,14 @@ fun TapSelectPanel(
                 selected = cutout.keepSubject,
                 onClick = { vm.setKeepSubject(!cutout.keepSubject) }
             )
-            ToggleChip(
-                text = "Add to selection",
-                selected = cutout.additive,
-                onClick = { /* hint only; tap behaviour is on the stage */ },
-                enabled = false
+            Text(
+                text = when (cutout.anchors.size) {
+                    0 -> "Nothing selected"
+                    1 -> "1 object selected"
+                    else -> "${cutout.anchors.size} objects selected"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Spacer(Modifier.weight(1f))
             if (cutout.isActive) {
